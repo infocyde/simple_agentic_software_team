@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic Software Team</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Agentic Software Team</h1>
+            <p class="subtitle">AI agents building software together</p>
+        </header>
+
+        <div class="main-layout">
+            <!-- Left Panel: Projects -->
+            <aside class="projects-panel">
+                <div class="panel-header">
+                    <h2>Projects</h2>
+                    <button id="newProjectBtn" class="btn btn-primary">+ New</button>
+                </div>
+                <ul id="projectList" class="project-list">
+                    {% for project in projects %}
+                    <li class="project-item" data-name="{{ project.name }}">
+                        <span class="project-name">{{ project.name }}</span>
+                        <span class="project-status">
+                            {% if project.has_summary %}
+                            <span class="badge badge-complete">Complete</span>
+                            {% elif project.todo_total > 0 %}
+                            <span class="badge badge-progress">{{ project.todo_completed }}/{{ project.todo_total }}</span>
+                            {% else %}
+                            <span class="badge badge-new">New</span>
+                            {% endif %}
+                        </span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </aside>
+
+            <!-- Center Panel: Main Content -->
+            <main class="main-panel">
+                <div id="noProjectSelected" class="empty-state">
+                    <h3>Select a project or create a new one</h3>
+                    <p>Projects appear in the left panel. Click on one to view details.</p>
+                </div>
+
+                <div id="projectView" class="project-view" style="display: none;">
+                    <div class="project-header">
+                        <h2 id="projectTitle">Project Name</h2>
+                        <div class="project-actions">
+                            <button id="kickoffBtn" class="btn btn-primary">Start Kickoff</button>
+                            <button id="featureBtn" class="btn btn-secondary">Add Feature</button>
+                            <button id="continueBtn" class="btn btn-secondary">Continue Work</button>
+                        </div>
+                    </div>
+
+                    <div class="tabs">
+                        <button class="tab active" data-tab="activity">Activity</button>
+                        <button class="tab" data-tab="spec">Spec</button>
+                        <button class="tab" data-tab="todo">TODO</button>
+                    </div>
+
+                    <div class="tab-content">
+                        <div id="activityTab" class="tab-pane active">
+                            <div id="activityFeed" class="activity-feed">
+                                <p class="empty-message">No activity yet. Start a kickoff or continue work.</p>
+                            </div>
+                        </div>
+                        <div id="specTab" class="tab-pane" style="display: none;">
+                            <pre id="specContent" class="content-display"></pre>
+                        </div>
+                        <div id="todoTab" class="tab-pane" style="display: none;">
+                            <pre id="todoContent" class="content-display"></pre>
+                        </div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- Right Panel: Agent Status -->
+            <aside class="agents-panel">
+                <h2>Team Status</h2>
+                <div class="agent-list">
+                    <div class="agent-item" data-agent="project_manager">
+                        <span class="agent-icon">📋</span>
+                        <span class="agent-name">Project Manager</span>
+                        <span class="agent-status idle">Idle</span>
+                    </div>
+                    <div class="agent-item" data-agent="software_engineer">
+                        <span class="agent-icon">💻</span>
+                        <span class="agent-name">Software Engineer</span>
+                        <span class="agent-status idle">Idle</span>
+                    </div>
+                    <div class="agent-item" data-agent="ui_ux_engineer">
+                        <span class="agent-icon">🎨</span>
+                        <span class="agent-name">UI/UX Engineer</span>
+                        <span class="agent-status idle">Idle</span>
+                    </div>
+                    <div class="agent-item" data-agent="database_admin">
+                        <span class="agent-icon">🗄️</span>
+                        <span class="agent-name">Database Admin</span>
+                        <span class="agent-status idle">Idle</span>
+                    </div>
+                    <div class="agent-item" data-agent="security_reviewer">
+                        <span class="agent-icon">🔒</span>
+                        <span class="agent-name">Security Reviewer</span>
+                        <span class="agent-status idle">Idle</span>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="modalOverlay" class="modal-overlay" style="display: none;">
+        <div id="newProjectModal" class="modal" style="display: none;">
+            <h3>Create New Project</h3>
+            <form id="newProjectForm">
+                <div class="form-group">
+                    <label for="projectName">Project Name</label>
+                    <input type="text" id="projectName" required placeholder="my-awesome-project">
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" id="cancelNewProject">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Create</button>
+                </div>
+            </form>
+        </div>
+
+        <div id="inputModal" class="modal" style="display: none;">
+            <h3>Input Needed</h3>
+            <p id="inputQuestion"></p>
+            <form id="inputForm">
+                <div class="form-group">
+                    <textarea id="humanInput" rows="4" required placeholder="Your response..."></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button type="submit" class="btn btn-primary">Submit</button>
+                </div>
+            </form>
+        </div>
+
+        <div id="messageModal" class="modal" style="display: none;">
+            <h3 id="messageModalTitle">Send Message</h3>
+            <form id="messageForm">
+                <div class="form-group">
+                    <textarea id="messageInput" rows="4" required placeholder="Describe what you want..."></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" id="cancelMessage">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Send</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

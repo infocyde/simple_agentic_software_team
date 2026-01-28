@@ -1,0 +1,183 @@
+"""Memory Manager - Handles persistent context and memory for projects."""
+
+import os
+import json
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+
+
+class MemoryManager:
+    """
+    Manages persistent memory for a project.
+    Keeps context minimal and focused to reduce token usage.
+
+    Memory is stored in MEMORY.md within the project directory.
+    """
+
+    def __init__(self, project_path: str):
+        self.project_path = project_path
+        self.memory_file = os.path.join(project_path, "MEMORY.md")
+        self._ensure_memory_file()
+
+    def _ensure_memory_file(self):
+        """Create memory file if it doesn't exist."""
+        if not os.path.exists(self.memory_file):
+            os.makedirs(os.path.dirname(self.memory_file), exist_ok=True)
+            with open(self.memory_file, 'w') as f:
+                f.write("# Project Memory\n\n")
+                f.write("This file tracks decisions, actions, and lessons learned.\n\n")
+                f.write("## Decisions\n\n")
+                f.write("## Actions Log\n\n")
+                f.write("## Lessons Learned\n\n")
+
+    def record_decision(self, decision: str, rationale: str):
+        """Record a key decision and its rationale."""
+        with open(self.memory_file, 'r') as f:
+            content = f.read()
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"- [{timestamp}] **{decision}**: {rationale}\n"
+
+        # Insert after ## Decisions header
+        marker = "## Decisions\n"
+        if marker in content:
+            pos = content.find(marker) + len(marker)
+            # Find the next line after the header
+            next_newline = content.find("\n", pos)
+            if next_newline != -1:
+                content = content[:next_newline+1] + entry + content[next_newline+1:]
+
+        with open(self.memory_file, 'w') as f:
+            f.write(content)
+
+    def record_action(self, agent: str, task: str, result: str):
+        """Record an action taken by an agent."""
+        with open(self.memory_file, 'r') as f:
+            content = f.read()
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # Keep action logs brief
+        brief_result = result[:200] + "..." if len(result) > 200 else result
+        entry = f"- [{timestamp}] **{agent}**: {task[:100]}\n  - Result: {brief_result}\n"
+
+        # Insert after ## Actions Log header
+        marker = "## Actions Log\n"
+        if marker in content:
+            pos = content.find(marker) + len(marker)
+            next_newline = content.find("\n", pos)
+            if next_newline != -1:
+                content = content[:next_newline+1] + entry + content[next_newline+1:]
+
+        with open(self.memory_file, 'w') as f:
+            f.write(content)
+
+    def record_lesson(self, lesson: str):
+        """Record a lesson learned for future reference."""
+        with open(self.memory_file, 'r') as f:
+            content = f.read()
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"- [{timestamp}] {lesson}\n"
+
+        marker = "## Lessons Learned\n"
+        if marker in content:
+            pos = content.find(marker) + len(marker)
+            next_newline = content.find("\n", pos)
+            if next_newline != -1:
+                content = content[:next_newline+1] + entry + content[next_newline+1:]
+
+        with open(self.memory_file, 'w') as f:
+            f.write(content)
+
+    def get_context_for_task(self, task: str) -> str:
+        """
+        Get minimal, relevant context for a specific task.
+        This keeps token usage low by only providing what's needed.
+        """
+        context_parts = []
+
+        # Always include recent decisions (last 5)
+        decisions = self._get_recent_decisions(5)
+        if decisions:
+            context_parts.append("Recent decisions:\n" + "\n".join(decisions))
+
+        # Include spec summary if it exists
+        spec_path = os.path.join(self.project_path, "SPEC.md")
+        if os.path.exists(spec_path):
+            with open(spec_path, 'r') as f:
+                spec = f.read()
+            # Only include first ~500 chars of spec for context
+            if len(spec) > 500:
+                spec = spec[:500] + "\n... (spec truncated, read SPEC.md for full details)"
+            context_parts.append(f"Project spec (summary):\n{spec}")
+
+        # Include current TODO status
+        todo_path = os.path.join(self.project_path, "TODO.md")
+        if os.path.exists(todo_path):
+            with open(todo_path, 'r') as f:
+                todo = f.read()
+            context_parts.append(f"Current TODO:\n{todo}")
+
+        return "\n\n---\n\n".join(context_parts) if context_parts else ""
+
+    def get_project_summary(self) -> str:
+        """Get a brief summary of the project state."""
+        summary_parts = []
+
+        # Spec exists?
+        spec_path = os.path.join(self.project_path, "SPEC.md")
+        if os.path.exists(spec_path):
+            summary_parts.append("- SPEC.md exists")
+
+        # TODO status
+        todo_path = os.path.join(self.project_path, "TODO.md")
+        if os.path.exists(todo_path):
+            with open(todo_path, 'r') as f:
+                todo = f.read()
+            completed = todo.count("[x]")
+            total = todo.count("[ ]") + completed
+            summary_parts.append(f"- TODO: {completed}/{total} tasks completed")
+
+        # Memory entries
+        if os.path.exists(self.memory_file):
+            with open(self.memory_file, 'r') as f:
+                memory = f.read()
+            decision_count = memory.count("**") // 2  # rough count
+            summary_parts.append(f"- Memory: ~{decision_count} decisions recorded")
+
+        return "\n".join(summary_parts) if summary_parts else "New project - no history yet"
+
+    def _get_recent_decisions(self, count: int) -> List[str]:
+        """Get the most recent decisions."""
+        if not os.path.exists(self.memory_file):
+            return []
+
+        with open(self.memory_file, 'r') as f:
+            content = f.read()
+
+        decisions = []
+        marker = "## Decisions\n"
+        end_marker = "## Actions Log"
+
+        if marker in content:
+            start = content.find(marker) + len(marker)
+            end = content.find(end_marker) if end_marker in content else len(content)
+            decisions_section = content[start:end].strip()
+
+            for line in decisions_section.split("\n"):
+                if line.startswith("- ["):
+                    decisions.append(line)
+                    if len(decisions) >= count:
+                        break
+
+        return decisions
+
+    def clear_memory(self):
+        """Clear all memory (use with caution)."""
+        self._ensure_memory_file()
+        with open(self.memory_file, 'w') as f:
+            f.write("# Project Memory\n\n")
+            f.write("This file tracks decisions, actions, and lessons learned.\n\n")
+            f.write("## Decisions\n\n")
+            f.write("## Actions Log\n\n")
+            f.write("## Lessons Learned\n\n")

@@ -1,0 +1,35 @@
+{
+  "defaults": {
+    "testing_strategy": "critical_paths",
+    "review_policy": "tiered",
+    "autonomy_level": "full"
+  },
+  "guardrails": {
+    "require_approval_for": [],
+    "blocked_operations": [],
+    "max_retries_before_escalation": 3
+  },
+  "agents": {
+    "project_manager": {
+      "enabled": true
+    },
+    "software_engineer": {
+      "enabled": true
+    },
+    "ui_ux_engineer": {
+      "enabled": true
+    },
+    "database_admin": {
+      "enabled": true
+    },
+    "security_reviewer": {
+      "enabled": true
+    }
+  },
+  "project_kickoff_questions": 18,
+  "feature_kickoff_questions": 10,
+  "cli": {
+    "timeout_seconds": 300,
+    "dangerously_skip_permissions": true
+  }
+}
