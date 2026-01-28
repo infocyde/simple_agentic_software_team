@@ -52,6 +52,14 @@ class Orchestrator:
         # Work state
         self.is_working = False
         self.pause_requested = False
+        self.total_failures = 0  # Track total failures for critical error detection
+
+        # Parallel execution settings
+        exec_config = config.get('execution', {})
+        self.max_concurrent = exec_config.get('max_concurrent_agents', 3)
+        self.task_timeout = exec_config.get('task_timeout_seconds', 120)
+        self.max_task_retries = exec_config.get('max_task_retries', 3)
+        self.semaphore = asyncio.Semaphore(self.max_concurrent)
 
         # Initialize agents
         self._init_agents()
@@ -164,7 +172,7 @@ class Orchestrator:
         context: str = "",
         priority: str = "medium"
     ) -> Dict[str, Any]:
-        """Assign a task to a specific agent."""
+        """Assign a task to a specific agent with timeout and retry handling."""
         if agent_name not in self.agents:
             return {"status": "error", "result": f"Unknown agent: {agent_name}"}
 
@@ -182,47 +190,68 @@ class Orchestrator:
             context = self.memory.get_context_for_task(task)
 
         # Execute with retry logic
-        max_retries = self.config.get("guardrails", {}).get("max_retries_before_escalation", 3)
         retries = 0
 
-        while retries < max_retries:
-            result = await agent.process_task(
-                task=task,
-                project_path=self.project_path,
-                context=context,
-                orchestrator=self,
-                config=self.config
-            )
+        while retries < self.max_task_retries:
+            try:
+                # Notify UI that agent is starting
+                await self._notify_agent_start(agent_name)
 
-            if result["status"] == "complete":
-                # Update memory with result
-                self.memory.record_action(agent_name, task, result["result"])
-                return result
+                # Use semaphore to limit concurrent agents
+                async with self.semaphore:
+                    result = await agent.process_task(
+                        task=task,
+                        project_path=self.project_path,
+                        context=context,
+                        orchestrator=self,
+                        config=self.config,
+                        timeout=self.task_timeout
+                    )
+
+                # Notify UI that agent finished
+                await self._notify_agent_complete(agent_name)
+
+                if result["status"] == "complete":
+                    # Update memory with result
+                    self.memory.record_action(agent_name, task, result["result"])
+                    self.total_failures = 0  # Reset on success
+                    return result
+
+                if result["status"] == "timeout":
+                    self.total_failures += 1
+                    self._log_activity({
+                        "timestamp": datetime.now().isoformat(),
+                        "agent": "orchestrator",
+                        "action": f"Timeout ({retries + 1}/{self.max_task_retries})",
+                        "details": f"Task timed out after {self.task_timeout}s"
+                    })
+
+            except Exception as e:
+                await self._notify_agent_complete(agent_name)
+                self.total_failures += 1
+                error_msg = str(e).encode('ascii', errors='replace').decode('ascii')
+                self._log_activity({
+                    "timestamp": datetime.now().isoformat(),
+                    "agent": "orchestrator",
+                    "action": f"Task error ({retries + 1}/{self.max_task_retries})",
+                    "details": error_msg[:200]
+                })
 
             retries += 1
-            self._log_activity({
-                "timestamp": datetime.now().isoformat(),
-                "agent": "orchestrator",
-                "action": f"Retry {retries}/{max_retries} for {agent_name}",
-                "details": "Task did not complete, retrying..."
-            })
 
-        # Escalate to human after max retries
-        self._log_activity({
-            "timestamp": datetime.now().isoformat(),
-            "agent": "orchestrator",
-            "action": "Escalating to human",
-            "details": f"Task failed after {max_retries} retries: {task[:100]}"
-        })
+            # Check for critical failure threshold (too many total failures)
+            if self.total_failures >= self.max_task_retries * 2:
+                await self._send_message(
+                    "critical_error",
+                    f"Too many failures ({self.total_failures}). Stopping work. Please check the logs."
+                )
+                self.is_working = False
+                return {"status": "critical_error", "result": "Too many failures"}
 
-        human_response = await self.request_human_input(
-            "orchestrator",
-            f"The team has been unable to complete this task after {max_retries} attempts:\n\n{task}\n\nPlease provide guidance or take over."
-        )
-
+        # Return error after max retries
         return {
-            "status": "escalated",
-            "result": f"Human response: {human_response}"
+            "status": "error",
+            "result": f"Task failed after {self.max_task_retries} retries"
         }
 
     async def start_project_kickoff(self, initial_request: str) -> Dict[str, Any]:
@@ -301,14 +330,24 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
             "details": "Will stop after current task completes"
         })
 
-    async def _send_message(self, msg_type: str, message: str):
+    async def _send_message(self, msg_type: str, message: str, **kwargs):
         """Send a message to the frontend."""
         if self.message_callback:
-            await self.message_callback({
+            msg = {
                 "type": msg_type,
                 "message": message,
                 "timestamp": datetime.now().isoformat()
-            })
+            }
+            msg.update(kwargs)
+            await self.message_callback(msg)
+
+    async def _notify_agent_start(self, agent_name: str):
+        """Notify UI that an agent started working."""
+        await self._send_message("agent_start", f"{agent_name} started", agent=agent_name)
+
+    async def _notify_agent_complete(self, agent_name: str):
+        """Notify UI that an agent finished working."""
+        await self._send_message("agent_complete", f"{agent_name} finished", agent=agent_name)
 
     def _parse_todo_tasks(self) -> List[Dict[str, Any]]:
         """Parse TODO.md and return list of tasks with their status."""
@@ -354,103 +393,119 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                 return task
         return None
 
+    def _get_parallel_tasks(self, max_tasks: int = None) -> List[Dict[str, Any]]:
+        """
+        Get a batch of tasks that can run in parallel.
+        Tasks in the same section are considered parallelizable.
+        """
+        if max_tasks is None:
+            max_tasks = self.max_concurrent
+
+        tasks = self._parse_todo_tasks()
+        uncompleted = [t for t in tasks if not t["completed"]]
+
+        if not uncompleted:
+            return []
+
+        # Get tasks from the same section (they're likely independent)
+        first_section = uncompleted[0]["section"]
+        same_section = [t for t in uncompleted if t["section"] == first_section]
+
+        return same_section[:max_tasks]
+
+    async def _execute_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a single task and return the result."""
+        agent_name = self._determine_agent_for_task(task["text"])
+
+        result = await self.assign_task(
+            agent_name=agent_name,
+            task=task["text"],
+            context=f"Section: {task['section']}\n\n" + self.memory.get_context_for_task(task["text"])
+        )
+
+        return {"task": task, "result": result, "agent": agent_name}
+
     async def start_work(self) -> Dict[str, Any]:
-        """Start working through TODO tasks with self-healing."""
+        """Start working through TODO tasks with parallel execution and self-healing."""
         if self.is_working:
             return {"status": "error", "result": "Work already in progress"}
 
         self.is_working = True
         self.pause_requested = False
-        consecutive_failures = 0
-        max_consecutive_failures = 3
+        self.total_failures = 0
+        skipped_tasks = set()
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
             "agent": "orchestrator",
             "action": "Starting work",
-            "details": "Reading TODO.md for tasks"
+            "details": f"Parallel execution enabled (max {self.max_concurrent} agents)"
         })
+
+        await self._send_message("work_started", "Work started")
 
         try:
             while self.is_working and not self.pause_requested:
-                # Get next uncompleted task
-                task = self._get_next_task()
+                # Get batch of parallel tasks
+                tasks = self._get_parallel_tasks()
 
-                if not task:
-                    self._log_activity({
-                        "timestamp": datetime.now().isoformat(),
-                        "agent": "orchestrator",
-                        "action": "All tasks complete",
-                        "details": "No more uncompleted tasks in TODO.md"
-                    })
-                    await self._send_message("work_complete", "All tasks in TODO.md are complete!")
-                    break
+                # Filter out skipped tasks
+                tasks = [t for t in tasks if t["text"] not in skipped_tasks]
 
-                # Determine which agent should handle this task
-                agent_name = self._determine_agent_for_task(task["text"])
+                if not tasks:
+                    # Check if there are any remaining uncompleted tasks
+                    remaining = self._get_next_task()
+                    if remaining and remaining["text"] not in skipped_tasks:
+                        tasks = [remaining]
+                    else:
+                        self._log_activity({
+                            "timestamp": datetime.now().isoformat(),
+                            "agent": "orchestrator",
+                            "action": "All tasks complete",
+                            "details": f"Completed. Skipped {len(skipped_tasks)} problematic tasks."
+                        })
+                        await self._send_message("work_complete", "All tasks in TODO.md are complete!")
+                        break
 
                 self._log_activity({
                     "timestamp": datetime.now().isoformat(),
                     "agent": "orchestrator",
-                    "action": f"Assigning task to {agent_name}",
-                    "details": task["text"][:100]
+                    "action": f"Running {len(tasks)} task(s) in parallel",
+                    "details": ", ".join([t["text"][:30] + "..." for t in tasks])
                 })
 
-                try:
-                    # Execute the task
-                    result = await self.assign_task(
-                        agent_name=agent_name,
-                        task=task["text"],
-                        context=f"Section: {task['section']}\n\n" + self.memory.get_context_for_task(task["text"])
-                    )
+                # Execute tasks in parallel
+                task_coroutines = [self._execute_task(task) for task in tasks]
+                results = await asyncio.gather(*task_coroutines, return_exceptions=True)
 
-                    # Mark task as complete in TODO.md if successful
+                # Process results
+                for res in results:
+                    if isinstance(res, Exception):
+                        error_msg = str(res).encode('ascii', errors='replace').decode('ascii')
+                        self._log_activity({
+                            "timestamp": datetime.now().isoformat(),
+                            "agent": "orchestrator",
+                            "action": "Task exception",
+                            "details": error_msg[:200]
+                        })
+                        continue
+
+                    task = res["task"]
+                    result = res["result"]
+
                     if result["status"] == "complete":
                         self._mark_task_complete(task["text"])
-                        consecutive_failures = 0  # Reset on success
-                    elif result["status"] == "error":
-                        consecutive_failures += 1
-                        self._log_activity({
-                            "timestamp": datetime.now().isoformat(),
-                            "agent": "orchestrator",
-                            "action": f"Task failed ({consecutive_failures}/{max_consecutive_failures})",
-                            "details": f"Will retry with different approach. Error: {result.get('result', 'Unknown')[:100]}"
-                        })
-
-                        # If task keeps failing, try a different agent or skip
-                        if consecutive_failures >= max_consecutive_failures:
-                            self._log_activity({
-                                "timestamp": datetime.now().isoformat(),
-                                "agent": "orchestrator",
-                                "action": "Skipping problematic task",
-                                "details": f"Task '{task['text'][:50]}...' failed {max_consecutive_failures} times, moving to next task"
-                            })
-                            # Don't mark as complete, but move on
-                            consecutive_failures = 0
-                            await self._send_message("info", f"Skipped task after {max_consecutive_failures} failures: {task['text'][:50]}...")
-
-                except Exception as task_error:
-                    # Self-healing: log error but continue with next task
-                    error_msg = str(task_error)
-                    # Sanitize error message for encoding issues
-                    error_msg = error_msg.encode('ascii', errors='replace').decode('ascii')
-
-                    consecutive_failures += 1
-                    self._log_activity({
-                        "timestamp": datetime.now().isoformat(),
-                        "agent": "orchestrator",
-                        "action": f"Task exception ({consecutive_failures}/{max_consecutive_failures})",
-                        "details": error_msg[:200]
-                    })
-
-                    if consecutive_failures >= max_consecutive_failures:
-                        self._log_activity({
-                            "timestamp": datetime.now().isoformat(),
-                            "agent": "orchestrator",
-                            "action": "Skipping after exceptions",
-                            "details": "Moving to next task"
-                        })
-                        consecutive_failures = 0
+                    elif result["status"] == "critical_error":
+                        # Critical error already sent to UI, stop work
+                        self.is_working = False
+                        break
+                    elif result["status"] in ("error", "timeout"):
+                        # Skip this task and move on
+                        skipped_tasks.add(task["text"])
+                        await self._send_message(
+                            "info",
+                            f"Skipped: {task['text'][:50]}..."
+                        )
 
                 # Check for pause request
                 if self.pause_requested:
@@ -461,6 +516,14 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                         "details": "Pause requested by user"
                     })
                     await self._send_message("work_paused", "Work paused. Click 'Start Work' to resume.")
+                    break
+
+                # Check for too many total failures
+                if self.total_failures >= self.max_task_retries * 3:
+                    await self._send_message(
+                        "critical_error",
+                        f"Too many failures ({self.total_failures}). Work stopped."
+                    )
                     break
 
         except Exception as e:

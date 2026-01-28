@@ -34,8 +34,12 @@
   "project_kickoff_questions": 18,
   "feature_kickoff_questions": 10,
   "cli": {
-    "timeout_seconds": 300,
     "dangerously_skip_permissions": true
+  },
+  "execution": {
+    "max_concurrent_agents": 3,
+    "task_timeout_seconds": 120,
+    "max_task_retries": 3
   },
   "model_routing": {
     "enabled": true,

@@ -539,6 +539,45 @@ header h1 {
     background: #2e7d32;
 }
 
+/* Global Activity Indicator */
+.activity-indicator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 15px;
+    background: linear-gradient(90deg, #0f4c75, #1a6ea0);
+    border-radius: 6px;
+    margin-bottom: 15px;
+    animation: indicatorGlow 2s ease-in-out infinite;
+}
+
+@keyframes indicatorGlow {
+    0%, 100% { box-shadow: 0 0 5px rgba(15, 76, 117, 0.5); }
+    50% { box-shadow: 0 0 15px rgba(15, 76, 117, 0.8); }
+}
+
+.activity-pulse {
+    width: 12px;
+    height: 12px;
+    background: #4caf50;
+    border-radius: 50%;
+    animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.2); opacity: 0.7; }
+}
+
+.activity-indicator span {
+    font-size: 0.9rem;
+}
+
+.activity-agents {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.8rem !important;
+}
+
 /* Error Modal */
 .error-modal {
     border: 2px solid #f44336;

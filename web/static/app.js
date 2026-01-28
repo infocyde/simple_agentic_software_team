@@ -8,6 +8,7 @@ class AgenticTeamApp {
         this.conversationActive = false;
         this.waitingForInput = false;
         this.workInProgress = false;
+        this.activeAgents = new Set();
 
         this.init();
     }
@@ -60,6 +61,7 @@ class AgenticTeamApp {
 
             case 'work_complete':
                 this.workInProgress = false;
+                this.clearActiveAgents();
                 this.updateWorkButtons();
                 this.addActivityItem({
                     agent: 'system',
@@ -71,6 +73,7 @@ class AgenticTeamApp {
 
             case 'work_paused':
                 this.workInProgress = false;
+                this.clearActiveAgents();
                 this.updateWorkButtons();
                 this.addActivityItem({
                     agent: 'system',
@@ -81,6 +84,7 @@ class AgenticTeamApp {
 
             case 'critical_error':
                 this.workInProgress = false;
+                this.clearActiveAgents();
                 this.updateWorkButtons();
                 this.showErrorModal(data.message || 'An unexpected error occurred');
                 break;
@@ -91,6 +95,20 @@ class AgenticTeamApp {
                     action: data.message,
                     timestamp: new Date().toISOString()
                 });
+                break;
+
+            case 'agent_start':
+                this.addActiveAgent(data.agent);
+                break;
+
+            case 'agent_complete':
+                this.removeActiveAgent(data.agent);
+                break;
+
+            case 'work_started':
+                this.workInProgress = true;
+                this.updateWorkButtons();
+                this.updateActivityIndicator();
                 break;
 
             case 'activity':
@@ -459,6 +477,42 @@ class AgenticTeamApp {
             details: message,
             timestamp: new Date().toISOString()
         });
+    }
+
+    updateActivityIndicator() {
+        const indicator = document.getElementById('activityIndicator');
+        const text = document.getElementById('activityText');
+        const agents = document.getElementById('activityAgents');
+
+        if (this.activeAgents.size > 0 || this.workInProgress) {
+            indicator.style.display = 'flex';
+
+            if (this.activeAgents.size > 0) {
+                const agentNames = Array.from(this.activeAgents).map(a => this.formatAgentName(a));
+                text.textContent = `Working... (${this.activeAgents.size} active)`;
+                agents.textContent = agentNames.join(', ');
+            } else {
+                text.textContent = 'Working...';
+                agents.textContent = '';
+            }
+        } else {
+            indicator.style.display = 'none';
+        }
+    }
+
+    addActiveAgent(agentName) {
+        this.activeAgents.add(agentName);
+        this.updateActivityIndicator();
+    }
+
+    removeActiveAgent(agentName) {
+        this.activeAgents.delete(agentName);
+        this.updateActivityIndicator();
+    }
+
+    clearActiveAgents() {
+        this.activeAgents.clear();
+        this.updateActivityIndicator();
     }
 
     // API methods
