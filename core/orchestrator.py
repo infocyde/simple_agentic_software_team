@@ -34,12 +34,14 @@ class Orchestrator:
         project_path: str,
         config: Dict[str, Any],
         activity_callback: Optional[Callable] = None,
-        human_input_callback: Optional[Callable] = None
+        human_input_callback: Optional[Callable] = None,
+        message_callback: Optional[Callable] = None
     ):
         self.project_path = project_path
         self.config = config
         self.activity_callback = activity_callback
         self.human_input_callback = human_input_callback
+        self.message_callback = message_callback  # For sending work status updates
         self.activity_log: List[Dict[str, Any]] = []
         self.memory = MemoryManager(project_path)
 
@@ -47,26 +49,37 @@ class Orchestrator:
         self.pending_human_input: Optional[Dict[str, Any]] = None
         self.human_input_event = asyncio.Event()
 
+        # Work state
+        self.is_working = False
+        self.pause_requested = False
+
         # Initialize agents
         self._init_agents()
 
     def _init_agents(self):
-        """Initialize all agents."""
+        """Initialize all agents with model preferences from config."""
+        agent_configs = self.config.get('agents', {})
+
         self.agents = {
             "project_manager": ProjectManagerAgent(
-                activity_callback=self._log_activity
+                activity_callback=self._log_activity,
+                model_preference=agent_configs.get('project_manager', {}).get('model', 'opus')
             ),
             "software_engineer": SoftwareEngineerAgent(
-                activity_callback=self._log_activity
+                activity_callback=self._log_activity,
+                model_preference=agent_configs.get('software_engineer', {}).get('model', 'auto')
             ),
             "ui_ux_engineer": UIUXEngineerAgent(
-                activity_callback=self._log_activity
+                activity_callback=self._log_activity,
+                model_preference=agent_configs.get('ui_ux_engineer', {}).get('model', 'auto')
             ),
             "database_admin": DatabaseAdminAgent(
-                activity_callback=self._log_activity
+                activity_callback=self._log_activity,
+                model_preference=agent_configs.get('database_admin', {}).get('model', 'auto')
             ),
             "security_reviewer": SecurityReviewerAgent(
-                activity_callback=self._log_activity
+                activity_callback=self._log_activity,
+                model_preference=agent_configs.get('security_reviewer', {}).get('model', 'opus')
             )
         }
 
@@ -177,7 +190,8 @@ class Orchestrator:
                 task=task,
                 project_path=self.project_path,
                 context=context,
-                orchestrator=self
+                orchestrator=self,
+                config=self.config
             )
 
             if result["status"] == "complete":
@@ -277,29 +291,241 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
 
         return result
 
-    async def continue_work(self) -> Dict[str, Any]:
-        """Continue working on the current project based on TODO.md."""
+    def request_pause(self):
+        """Request a pause after the current task completes."""
+        self.pause_requested = True
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
             "agent": "orchestrator",
-            "action": "Continuing work",
-            "details": "Checking TODO for next tasks"
+            "action": "Pause requested",
+            "details": "Will stop after current task completes"
         })
 
-        pm = self.agents["project_manager"]
+    async def _send_message(self, msg_type: str, message: str):
+        """Send a message to the frontend."""
+        if self.message_callback:
+            await self.message_callback({
+                "type": msg_type,
+                "message": message,
+                "timestamp": datetime.now().isoformat()
+            })
 
-        continue_task = """Check the current TODO.md and project status.
-Identify the next uncompleted tasks and coordinate the team to work on them.
-Assign tasks to the appropriate team members and track progress."""
+    def _parse_todo_tasks(self) -> List[Dict[str, Any]]:
+        """Parse TODO.md and return list of tasks with their status."""
+        todo_path = os.path.join(self.project_path, "TODO.md")
+        if not os.path.exists(todo_path):
+            return []
 
-        result = await pm.process_task(
-            task=continue_task,
-            project_path=self.project_path,
-            context=self.memory.get_project_summary(),
-            orchestrator=self
-        )
+        with open(todo_path, 'r', encoding='utf-8') as f:
+            content = f.read()
 
-        return result
+        tasks = []
+        current_section = "General"
+
+        for line in content.split('\n'):
+            line = line.strip()
+
+            # Detect section headers
+            if line.startswith('## '):
+                current_section = line[3:].strip()
+                continue
+
+            # Parse task items
+            if line.startswith('- [ ] '):
+                tasks.append({
+                    "text": line[6:].strip(),
+                    "completed": False,
+                    "section": current_section
+                })
+            elif line.startswith('- [x] ') or line.startswith('- [X] '):
+                tasks.append({
+                    "text": line[6:].strip(),
+                    "completed": True,
+                    "section": current_section
+                })
+
+        return tasks
+
+    def _get_next_task(self) -> Optional[Dict[str, Any]]:
+        """Get the next uncompleted task from TODO.md."""
+        tasks = self._parse_todo_tasks()
+        for task in tasks:
+            if not task["completed"]:
+                return task
+        return None
+
+    async def start_work(self) -> Dict[str, Any]:
+        """Start working through TODO tasks with self-healing."""
+        if self.is_working:
+            return {"status": "error", "result": "Work already in progress"}
+
+        self.is_working = True
+        self.pause_requested = False
+        consecutive_failures = 0
+        max_consecutive_failures = 3
+
+        self._log_activity({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "orchestrator",
+            "action": "Starting work",
+            "details": "Reading TODO.md for tasks"
+        })
+
+        try:
+            while self.is_working and not self.pause_requested:
+                # Get next uncompleted task
+                task = self._get_next_task()
+
+                if not task:
+                    self._log_activity({
+                        "timestamp": datetime.now().isoformat(),
+                        "agent": "orchestrator",
+                        "action": "All tasks complete",
+                        "details": "No more uncompleted tasks in TODO.md"
+                    })
+                    await self._send_message("work_complete", "All tasks in TODO.md are complete!")
+                    break
+
+                # Determine which agent should handle this task
+                agent_name = self._determine_agent_for_task(task["text"])
+
+                self._log_activity({
+                    "timestamp": datetime.now().isoformat(),
+                    "agent": "orchestrator",
+                    "action": f"Assigning task to {agent_name}",
+                    "details": task["text"][:100]
+                })
+
+                try:
+                    # Execute the task
+                    result = await self.assign_task(
+                        agent_name=agent_name,
+                        task=task["text"],
+                        context=f"Section: {task['section']}\n\n" + self.memory.get_context_for_task(task["text"])
+                    )
+
+                    # Mark task as complete in TODO.md if successful
+                    if result["status"] == "complete":
+                        self._mark_task_complete(task["text"])
+                        consecutive_failures = 0  # Reset on success
+                    elif result["status"] == "error":
+                        consecutive_failures += 1
+                        self._log_activity({
+                            "timestamp": datetime.now().isoformat(),
+                            "agent": "orchestrator",
+                            "action": f"Task failed ({consecutive_failures}/{max_consecutive_failures})",
+                            "details": f"Will retry with different approach. Error: {result.get('result', 'Unknown')[:100]}"
+                        })
+
+                        # If task keeps failing, try a different agent or skip
+                        if consecutive_failures >= max_consecutive_failures:
+                            self._log_activity({
+                                "timestamp": datetime.now().isoformat(),
+                                "agent": "orchestrator",
+                                "action": "Skipping problematic task",
+                                "details": f"Task '{task['text'][:50]}...' failed {max_consecutive_failures} times, moving to next task"
+                            })
+                            # Don't mark as complete, but move on
+                            consecutive_failures = 0
+                            await self._send_message("info", f"Skipped task after {max_consecutive_failures} failures: {task['text'][:50]}...")
+
+                except Exception as task_error:
+                    # Self-healing: log error but continue with next task
+                    error_msg = str(task_error)
+                    # Sanitize error message for encoding issues
+                    error_msg = error_msg.encode('ascii', errors='replace').decode('ascii')
+
+                    consecutive_failures += 1
+                    self._log_activity({
+                        "timestamp": datetime.now().isoformat(),
+                        "agent": "orchestrator",
+                        "action": f"Task exception ({consecutive_failures}/{max_consecutive_failures})",
+                        "details": error_msg[:200]
+                    })
+
+                    if consecutive_failures >= max_consecutive_failures:
+                        self._log_activity({
+                            "timestamp": datetime.now().isoformat(),
+                            "agent": "orchestrator",
+                            "action": "Skipping after exceptions",
+                            "details": "Moving to next task"
+                        })
+                        consecutive_failures = 0
+
+                # Check for pause request
+                if self.pause_requested:
+                    self._log_activity({
+                        "timestamp": datetime.now().isoformat(),
+                        "agent": "orchestrator",
+                        "action": "Work paused",
+                        "details": "Pause requested by user"
+                    })
+                    await self._send_message("work_paused", "Work paused. Click 'Start Work' to resume.")
+                    break
+
+        except Exception as e:
+            # Critical error - send to UI
+            error_msg = str(e).encode('ascii', errors='replace').decode('ascii')
+            self._log_activity({
+                "timestamp": datetime.now().isoformat(),
+                "agent": "orchestrator",
+                "action": "Critical error",
+                "details": error_msg
+            })
+            await self._send_message("critical_error", f"Critical error: {error_msg}")
+
+        finally:
+            self.is_working = False
+            self.pause_requested = False
+
+        return {"status": "complete", "result": "Work session ended"}
+
+    def _determine_agent_for_task(self, task_text: str) -> str:
+        """Determine which agent should handle a task based on keywords."""
+        task_lower = task_text.lower()
+
+        # UI/UX related
+        if any(kw in task_lower for kw in ['ui', 'ux', 'design', 'css', 'style', 'layout', 'interface', 'frontend', 'html', 'template']):
+            return "ui_ux_engineer"
+
+        # Database related
+        if any(kw in task_lower for kw in ['database', 'db', 'schema', 'sql', 'migration', 'model', 'table', 'query']):
+            return "database_admin"
+
+        # Security related
+        if any(kw in task_lower for kw in ['security', 'auth', 'authentication', 'authorization', 'encrypt', 'password', 'token']):
+            return "security_reviewer"
+
+        # Default to software engineer
+        return "software_engineer"
+
+    def _mark_task_complete(self, task_text: str):
+        """Mark a task as complete in TODO.md."""
+        todo_path = os.path.join(self.project_path, "TODO.md")
+        if not os.path.exists(todo_path):
+            return
+
+        with open(todo_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Replace the unchecked task with checked
+        old_task = f"- [ ] {task_text}"
+        new_task = f"- [x] {task_text}"
+        content = content.replace(old_task, new_task)
+
+        with open(todo_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self._log_activity({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "orchestrator",
+            "action": "Task completed",
+            "details": task_text[:100]
+        })
+
+    async def continue_work(self) -> Dict[str, Any]:
+        """Continue working on the current project (alias for start_work)."""
+        return await self.start_work()
 
     async def request_security_review(self, files: List[str]) -> Dict[str, Any]:
         """Request a security review for specified files."""

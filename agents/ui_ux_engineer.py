@@ -10,7 +10,7 @@ class UIUXEngineerAgent(BaseAgent):
     and user experience design.
     """
 
-    def __init__(self, activity_callback=None):
+    def __init__(self, activity_callback=None, model_preference: str = "auto"):
         system_prompt = """You are a UI/UX Engineer on an agentic development team. Your focus is creating functional, usable interfaces FAST.
 
 Your responsibilities:
@@ -39,7 +39,8 @@ When working:
             name="ui_ux_engineer",
             role="UI/UX Engineer",
             system_prompt=system_prompt,
-            activity_callback=activity_callback
+            activity_callback=activity_callback,
+            model_preference=model_preference
         )
 
     def get_capabilities(self) -> List[str]:

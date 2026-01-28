@@ -51,17 +51,36 @@
                         <div class="project-actions">
                             <button id="kickoffBtn" class="btn btn-primary">Start Kickoff</button>
                             <button id="featureBtn" class="btn btn-secondary">Add Feature</button>
-                            <button id="continueBtn" class="btn btn-secondary">Continue Work</button>
+                            <button id="startWorkBtn" class="btn btn-secondary">Start Work</button>
+                            <button id="pauseBtn" class="btn btn-secondary" style="display: none;">Pause</button>
                         </div>
                     </div>
 
                     <div class="tabs">
+                        <button class="tab" data-tab="chat">Chat</button>
                         <button class="tab active" data-tab="activity">Activity</button>
                         <button class="tab" data-tab="spec">Spec</button>
                         <button class="tab" data-tab="todo">TODO</button>
                     </div>
 
                     <div class="tab-content">
+                        <!-- Chat Tab - For Q&A with agents -->
+                        <div id="chatTab" class="tab-pane" style="display: none;">
+                            <div class="chat-container">
+                                <div id="chatMessages" class="chat-messages">
+                                    <p class="empty-message">Start a kickoff or add a feature to begin chatting with the team.</p>
+                                </div>
+                                <div class="chat-input-area">
+                                    <div id="chatStatus" class="chat-status"></div>
+                                    <form id="chatForm" class="chat-form">
+                                        <textarea id="chatInput" rows="2" placeholder="Type your response..." disabled></textarea>
+                                        <button type="submit" class="btn btn-primary" id="chatSendBtn" disabled>Send</button>
+                                        <button type="button" class="btn btn-secondary" id="writeSpecBtn" style="display: none;">Write Spec</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+
                         <div id="activityTab" class="tab-pane active">
                             <div id="activityFeed" class="activity-feed">
                                 <p class="empty-message">No activity yet. Start a kickoff or continue work.</p>
@@ -127,30 +146,25 @@
             </form>
         </div>
 
-        <div id="inputModal" class="modal" style="display: none;">
-            <h3>Input Needed</h3>
-            <p id="inputQuestion"></p>
-            <form id="inputForm">
-                <div class="form-group">
-                    <textarea id="humanInput" rows="4" required placeholder="Your response..."></textarea>
-                </div>
-                <div class="modal-actions">
-                    <button type="submit" class="btn btn-primary">Submit</button>
-                </div>
-            </form>
-        </div>
-
         <div id="messageModal" class="modal" style="display: none;">
             <h3 id="messageModalTitle">Send Message</h3>
             <form id="messageForm">
                 <div class="form-group">
-                    <textarea id="messageInput" rows="4" required placeholder="Describe what you want..."></textarea>
+                    <textarea id="messageInput" rows="4" required placeholder="Describe what you want to build..."></textarea>
                 </div>
                 <div class="modal-actions">
                     <button type="button" class="btn btn-secondary" id="cancelMessage">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Send</button>
+                    <button type="submit" class="btn btn-primary">Start</button>
                 </div>
             </form>
+        </div>
+
+        <div id="errorModal" class="modal error-modal" style="display: none;">
+            <h3 class="error-title">Error</h3>
+            <div id="errorMessage" class="error-message"></div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-primary" id="dismissError">Dismiss</button>
+            </div>
         </div>
     </div>
 

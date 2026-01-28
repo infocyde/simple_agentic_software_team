@@ -10,7 +10,7 @@ class DatabaseAdminAgent(BaseAgent):
     migrations, and data modeling.
     """
 
-    def __init__(self, activity_callback=None):
+    def __init__(self, activity_callback=None, model_preference: str = "auto"):
         system_prompt = """You are a Database Admin on an agentic development team. Your focus is creating functional data layers FAST.
 
 Your responsibilities:
@@ -43,7 +43,8 @@ Database preferences (in order):
             name="database_admin",
             role="Database Admin",
             system_prompt=system_prompt,
-            activity_callback=activity_callback
+            activity_callback=activity_callback,
+            model_preference=model_preference
         )
 
     def get_capabilities(self) -> List[str]:

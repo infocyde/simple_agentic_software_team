@@ -4,6 +4,7 @@ from .project import ProjectManager
 from .git_manager import GitManager
 from .summary import SummaryGenerator
 from .guardrails import Guardrails
+from .conversation import ConversationManager
 
 __all__ = [
     'Orchestrator',
@@ -11,5 +12,6 @@ __all__ = [
     'ProjectManager',
     'GitManager',
     'SummaryGenerator',
-    'Guardrails'
+    'Guardrails',
+    'ConversationManager'
 ]

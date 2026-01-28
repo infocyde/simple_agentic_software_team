@@ -10,7 +10,7 @@ class SoftwareEngineerAgent(BaseAgent):
     backend logic, APIs, and general programming.
     """
 
-    def __init__(self, activity_callback=None):
+    def __init__(self, activity_callback=None, model_preference: str = "auto"):
         system_prompt = """You are a Software Engineer on an agentic development team. Your focus is SPEED over perfection.
 
 Your responsibilities:
@@ -38,7 +38,8 @@ When working:
             name="software_engineer",
             role="Software Engineer",
             system_prompt=system_prompt,
-            activity_callback=activity_callback
+            activity_callback=activity_callback,
+            model_preference=model_preference
         )
 
     def get_capabilities(self) -> List[str]:

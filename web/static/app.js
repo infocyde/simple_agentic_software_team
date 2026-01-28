@@ -4,8 +4,10 @@ class AgenticTeamApp {
     constructor() {
         this.currentProject = null;
         this.ws = null;
-        this.pendingInputRequest = null;
         this.messageType = null;
+        this.conversationActive = false;
+        this.waitingForInput = false;
+        this.workInProgress = false;
 
         this.init();
     }
@@ -21,7 +23,7 @@ class AgenticTeamApp {
 
         this.ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            this.handleActivity(data);
+            this.handleWebSocketMessage(data);
         };
 
         this.ws.onclose = () => {
@@ -32,6 +34,98 @@ class AgenticTeamApp {
         this.ws.onerror = (error) => {
             console.error('WebSocket error:', error);
         };
+    }
+
+    handleWebSocketMessage(data) {
+        console.log('WS message:', data);
+
+        // Handle different message types
+        switch (data.type) {
+            case 'agent_message':
+                this.addChatMessage(data.agent, data.message, 'agent');
+                this.setWaitingForInput(true, data.agent);
+                break;
+
+            case 'agent_thinking':
+                this.showThinkingIndicator(data.agent);
+                break;
+
+            case 'conversation_complete':
+                this.addChatMessage('system', data.message || 'Conversation complete. Documents have been updated.', 'system');
+                this.setWaitingForInput(false);
+                this.conversationActive = false;
+                document.getElementById('writeSpecBtn').style.display = 'none';
+                this.loadProjectData(); // Refresh spec and todo
+                break;
+
+            case 'work_complete':
+                this.workInProgress = false;
+                this.updateWorkButtons();
+                this.addActivityItem({
+                    agent: 'system',
+                    action: data.message || 'Work completed',
+                    timestamp: new Date().toISOString()
+                });
+                this.loadProjectData();
+                break;
+
+            case 'work_paused':
+                this.workInProgress = false;
+                this.updateWorkButtons();
+                this.addActivityItem({
+                    agent: 'system',
+                    action: data.message || 'Work paused - ready to resume',
+                    timestamp: new Date().toISOString()
+                });
+                break;
+
+            case 'critical_error':
+                this.workInProgress = false;
+                this.updateWorkButtons();
+                this.showErrorModal(data.message || 'An unexpected error occurred');
+                break;
+
+            case 'info':
+                this.addActivityItem({
+                    agent: 'system',
+                    action: data.message,
+                    timestamp: new Date().toISOString()
+                });
+                break;
+
+            case 'activity':
+                this.handleActivity(data);
+                break;
+
+            case 'error':
+                this.addChatMessage('system', `Error: ${data.message}`, 'system');
+                this.setWaitingForInput(false);
+                break;
+
+            default:
+                // Legacy activity format
+                if (data.agent && data.action) {
+                    this.handleActivity(data);
+                }
+        }
+    }
+
+    handleActivity(data) {
+        // Update agent status
+        if (data.agent) {
+            this.updateAgentStatus(data.agent, 'working');
+            setTimeout(() => this.updateAgentStatus(data.agent, 'idle'), 3000);
+        }
+
+        // Add to activity feed if for current project
+        if (data.project === this.currentProject || !data.project) {
+            this.addActivityItem(data);
+        }
+
+        // Refresh project data periodically
+        if (data.action && (data.action.includes('Wrote file') || data.action.includes('complete'))) {
+            setTimeout(() => this.loadProjectData(), 500);
+        }
     }
 
     bindEvents() {
@@ -48,12 +142,14 @@ class AgenticTeamApp {
         // Project actions
         document.getElementById('kickoffBtn').addEventListener('click', () => this.showMessageModal('kickoff'));
         document.getElementById('featureBtn').addEventListener('click', () => this.showMessageModal('feature'));
-        document.getElementById('continueBtn').addEventListener('click', () => this.continueWork());
+        document.getElementById('startWorkBtn').addEventListener('click', () => this.startWork());
+        document.getElementById('pauseBtn').addEventListener('click', () => this.pauseWork());
+        document.getElementById('writeSpecBtn').addEventListener('click', () => this.writeSpec());
         document.getElementById('cancelMessage').addEventListener('click', () => this.hideModals());
-        document.getElementById('messageForm').addEventListener('submit', (e) => this.sendMessage(e));
+        document.getElementById('messageForm').addEventListener('submit', (e) => this.startConversation(e));
 
-        // Human input form
-        document.getElementById('inputForm').addEventListener('submit', (e) => this.submitHumanInput(e));
+        // Chat form
+        document.getElementById('chatForm').addEventListener('submit', (e) => this.sendChatMessage(e));
 
         // Tabs
         document.querySelectorAll('.tab').forEach(tab => {
@@ -64,6 +160,17 @@ class AgenticTeamApp {
         document.getElementById('modalOverlay').addEventListener('click', (e) => {
             if (e.target.id === 'modalOverlay') {
                 this.hideModals();
+            }
+        });
+
+        // Error modal dismiss
+        document.getElementById('dismissError').addEventListener('click', () => this.hideModals());
+
+        // Enter key in chat
+        document.getElementById('chatInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                document.getElementById('chatForm').dispatchEvent(new Event('submit'));
             }
         });
     }
@@ -79,6 +186,11 @@ class AgenticTeamApp {
         document.getElementById('noProjectSelected').style.display = 'none';
         document.getElementById('projectView').style.display = 'block';
         document.getElementById('projectTitle').textContent = name;
+
+        // Reset chat
+        this.clearChat();
+        this.conversationActive = false;
+        this.setWaitingForInput(false);
 
         // Load project data
         await this.loadProjectData();
@@ -105,31 +217,6 @@ class AgenticTeamApp {
 
         } catch (error) {
             console.error('Error loading project data:', error);
-        }
-    }
-
-    handleActivity(data) {
-        // Check if this is a human input request
-        if (data.type === 'human_input_needed') {
-            this.showInputModal(data.question);
-            return;
-        }
-
-        // Update agent status
-        if (data.agent) {
-            this.updateAgentStatus(data.agent, 'working');
-            // Reset to idle after a delay
-            setTimeout(() => this.updateAgentStatus(data.agent, 'idle'), 3000);
-        }
-
-        // Add to activity feed if for current project
-        if (data.project === this.currentProject || !data.project) {
-            this.addActivityItem(data);
-        }
-
-        // Refresh project data periodically
-        if (data.action && (data.action.includes('Wrote file') || data.action.includes('complete'))) {
-            setTimeout(() => this.loadProjectData(), 500);
         }
     }
 
@@ -195,7 +282,8 @@ class AgenticTeamApp {
             'ui_ux_engineer': 'UI/UX Engineer',
             'database_admin': 'Database Admin',
             'security_reviewer': 'Security Reviewer',
-            'orchestrator': 'Orchestrator'
+            'orchestrator': 'Orchestrator',
+            'system': 'System'
         };
         return names[name] || name;
     }
@@ -219,6 +307,116 @@ class AgenticTeamApp {
         document.getElementById(`${tabName}Tab`).style.display = 'block';
     }
 
+    // Chat methods
+    clearChat() {
+        const messages = document.getElementById('chatMessages');
+        messages.innerHTML = '<p class="empty-message">Start a kickoff or add a feature to begin chatting with the team.</p>';
+    }
+
+    addChatMessage(sender, text, type = 'agent') {
+        const messages = document.getElementById('chatMessages');
+
+        // Remove empty message if present
+        const emptyMsg = messages.querySelector('.empty-message');
+        if (emptyMsg) emptyMsg.remove();
+
+        // Remove thinking indicator if present
+        const thinking = messages.querySelector('.thinking-indicator');
+        if (thinking) thinking.remove();
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `chat-message ${type}`;
+
+        if (type !== 'system') {
+            messageDiv.innerHTML = `
+                <div class="chat-sender">${this.formatAgentName(sender)}</div>
+                <div class="chat-text">${this.escapeHtml(text)}</div>
+            `;
+        } else {
+            messageDiv.innerHTML = `<div class="chat-text">${this.escapeHtml(text)}</div>`;
+        }
+
+        messages.appendChild(messageDiv);
+        messages.scrollTop = messages.scrollHeight;
+    }
+
+    showThinkingIndicator(agent) {
+        const messages = document.getElementById('chatMessages');
+
+        // Remove existing thinking indicator
+        const existing = messages.querySelector('.thinking-indicator');
+        if (existing) existing.remove();
+
+        const indicator = document.createElement('div');
+        indicator.className = 'thinking-indicator';
+        indicator.innerHTML = `
+            <span>${this.formatAgentName(agent)} is thinking</span>
+            <div class="thinking-dots">
+                <span></span><span></span><span></span>
+            </div>
+        `;
+
+        messages.appendChild(indicator);
+        messages.scrollTop = messages.scrollHeight;
+    }
+
+    setWaitingForInput(waiting, agent = null) {
+        this.waitingForInput = waiting;
+        const input = document.getElementById('chatInput');
+        const sendBtn = document.getElementById('chatSendBtn');
+        const writeSpecBtn = document.getElementById('writeSpecBtn');
+        const status = document.getElementById('chatStatus');
+
+        input.disabled = !waiting;
+        sendBtn.disabled = !waiting;
+
+        // Show Write Spec button when conversation is active and waiting for input
+        if (waiting && this.conversationActive) {
+            writeSpecBtn.style.display = 'inline-block';
+        } else {
+            writeSpecBtn.style.display = 'none';
+        }
+
+        if (waiting) {
+            status.textContent = `Waiting for your response... (or click "Write Spec" when ready)`;
+            status.className = 'chat-status waiting';
+            input.focus();
+        } else {
+            status.textContent = '';
+            status.className = 'chat-status';
+        }
+    }
+
+    async sendChatMessage(e) {
+        e.preventDefault();
+        if (!this.waitingForInput || !this.currentProject) return;
+
+        const input = document.getElementById('chatInput');
+        const message = input.value.trim();
+        if (!message) return;
+
+        // Add user message to chat
+        this.addChatMessage('You', message, 'user');
+        input.value = '';
+        this.setWaitingForInput(false);
+
+        // Show thinking indicator
+        this.showThinkingIndicator('project_manager');
+
+        // Send to backend
+        try {
+            await fetch(`/api/projects/${this.currentProject}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message })
+            });
+        } catch (error) {
+            console.error('Error sending message:', error);
+            this.addChatMessage('system', 'Error sending message. Please try again.', 'system');
+            this.setWaitingForInput(true);
+        }
+    }
+
     // Modal methods
     showNewProjectModal() {
         document.getElementById('modalOverlay').style.display = 'flex';
@@ -230,8 +428,8 @@ class AgenticTeamApp {
         this.messageType = type;
         const title = type === 'kickoff' ? 'Start Project Kickoff' : 'Add Feature Request';
         const placeholder = type === 'kickoff' ?
-            'Describe what you want to build...' :
-            'Describe the feature you want to add...';
+            'Briefly describe what you want to build...' :
+            'Briefly describe the feature you want to add...';
 
         document.getElementById('messageModalTitle').textContent = title;
         document.getElementById('messageInput').placeholder = placeholder;
@@ -242,21 +440,25 @@ class AgenticTeamApp {
         document.getElementById('messageInput').focus();
     }
 
-    showInputModal(question) {
-        this.pendingInputRequest = true;
-        document.getElementById('inputQuestion').textContent = question;
-        document.getElementById('humanInput').value = '';
-
-        document.getElementById('modalOverlay').style.display = 'flex';
-        document.getElementById('inputModal').style.display = 'block';
-        document.getElementById('humanInput').focus();
-    }
-
     hideModals() {
         document.getElementById('modalOverlay').style.display = 'none';
         document.getElementById('newProjectModal').style.display = 'none';
         document.getElementById('messageModal').style.display = 'none';
-        document.getElementById('inputModal').style.display = 'none';
+        document.getElementById('errorModal').style.display = 'none';
+    }
+
+    showErrorModal(message) {
+        document.getElementById('errorMessage').textContent = message;
+        document.getElementById('modalOverlay').style.display = 'flex';
+        document.getElementById('errorModal').style.display = 'block';
+
+        // Also add to activity feed
+        this.addActivityItem({
+            agent: 'system',
+            action: 'Critical Error',
+            details: message,
+            timestamp: new Date().toISOString()
+        });
     }
 
     // API methods
@@ -300,69 +502,126 @@ class AgenticTeamApp {
         }
     }
 
-    async sendMessage(e) {
+    async startConversation(e) {
         e.preventDefault();
         const message = document.getElementById('messageInput').value.trim();
         if (!message || !this.currentProject) return;
 
         const endpoint = this.messageType === 'kickoff' ? 'kickoff' : 'feature';
 
+        // Clear chat and switch to chat tab
+        this.clearChat();
+        this.switchTab('chat');
+        this.conversationActive = true;
+
+        // Add initial user message
+        this.addChatMessage('You', message, 'user');
+        this.showThinkingIndicator('project_manager');
+
+        this.hideModals();
+
         try {
             const res = await fetch(`/api/projects/${this.currentProject}/${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project: this.currentProject, message })
+                body: JSON.stringify({ message })
             });
 
             const data = await res.json();
-            this.hideModals();
-
-            // Switch to activity tab to see progress
-            this.switchTab('activity');
+            if (data.status === 'error') {
+                this.addChatMessage('system', `Error: ${data.message}`, 'system');
+            }
 
         } catch (error) {
-            console.error('Error sending message:', error);
-            alert('Error sending message');
+            console.error('Error starting conversation:', error);
+            this.addChatMessage('system', 'Error starting conversation', 'system');
         }
     }
 
-    async continueWork() {
-        if (!this.currentProject) return;
+    async writeSpec() {
+        if (!this.currentProject || !this.conversationActive) return;
+
+        // Disable the button and show thinking
+        document.getElementById('writeSpecBtn').disabled = true;
+        document.getElementById('writeSpecBtn').textContent = 'Creating...';
+        this.setWaitingForInput(false);
+        this.showThinkingIndicator('project_manager');
 
         try {
-            const res = await fetch(`/api/projects/${this.currentProject}/continue`, {
+            const res = await fetch(`/api/projects/${this.currentProject}/write-spec`, {
                 method: 'POST'
             });
 
             const data = await res.json();
-
-            // Switch to activity tab to see progress
-            this.switchTab('activity');
-
+            if (data.status === 'error') {
+                this.addChatMessage('system', `Error: ${data.message}`, 'system');
+            }
         } catch (error) {
-            console.error('Error continuing work:', error);
-            alert('Error continuing work');
+            console.error('Error writing spec:', error);
+            this.addChatMessage('system', 'Error creating spec. Please try again.', 'system');
+        } finally {
+            document.getElementById('writeSpecBtn').disabled = false;
+            document.getElementById('writeSpecBtn').textContent = 'Write Spec';
         }
     }
 
-    async submitHumanInput(e) {
-        e.preventDefault();
-        const response = document.getElementById('humanInput').value.trim();
-        if (!response || !this.currentProject) return;
+    async startWork() {
+        if (!this.currentProject) return;
+
+        // Switch to activity tab to see progress
+        this.switchTab('activity');
+        this.workInProgress = true;
+        this.updateWorkButtons();
 
         try {
-            await fetch(`/api/projects/${this.currentProject}/human-input`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project: this.currentProject, response })
+            const res = await fetch(`/api/projects/${this.currentProject}/start-work`, {
+                method: 'POST'
             });
 
-            this.pendingInputRequest = false;
-            this.hideModals();
-
+            const data = await res.json();
+            if (data.status === 'error') {
+                alert(data.message || 'Error starting work');
+                this.workInProgress = false;
+                this.updateWorkButtons();
+            }
         } catch (error) {
-            console.error('Error submitting input:', error);
-            alert('Error submitting input');
+            console.error('Error starting work:', error);
+            alert('Error starting work');
+            this.workInProgress = false;
+            this.updateWorkButtons();
+        }
+    }
+
+    async pauseWork() {
+        if (!this.currentProject || !this.workInProgress) return;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/pause`, {
+                method: 'POST'
+            });
+
+            const data = await res.json();
+            this.addActivityItem({
+                agent: 'system',
+                action: 'Pause requested - will stop after current task completes',
+                timestamp: new Date().toISOString()
+            });
+        } catch (error) {
+            console.error('Error pausing work:', error);
+            alert('Error pausing work');
+        }
+    }
+
+    updateWorkButtons() {
+        const startBtn = document.getElementById('startWorkBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+
+        if (this.workInProgress) {
+            startBtn.style.display = 'none';
+            pauseBtn.style.display = 'inline-block';
+        } else {
+            startBtn.style.display = 'inline-block';
+            pauseBtn.style.display = 'none';
         }
     }
 }

@@ -10,7 +10,7 @@ class SecurityReviewerAgent(BaseAgent):
     Security issues BLOCK progress. Code quality issues are advisory.
     """
 
-    def __init__(self, activity_callback=None):
+    def __init__(self, activity_callback=None, model_preference: str = "opus"):
         system_prompt = """You are the Security & Code Reviewer on an agentic development team.
 
 Your responsibilities:
@@ -58,7 +58,8 @@ Report format:
             name="security_reviewer",
             role="Security & Code Reviewer",
             system_prompt=system_prompt,
-            activity_callback=activity_callback
+            activity_callback=activity_callback,
+            model_preference=model_preference
         )
 
     def get_capabilities(self) -> List[str]:

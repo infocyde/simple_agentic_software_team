@@ -11,19 +11,24 @@
   },
   "agents": {
     "project_manager": {
-      "enabled": true
+      "enabled": true,
+      "model": "opus"
     },
     "software_engineer": {
-      "enabled": true
+      "enabled": true,
+      "model": "auto"
     },
     "ui_ux_engineer": {
-      "enabled": true
+      "enabled": true,
+      "model": "auto"
     },
     "database_admin": {
-      "enabled": true
+      "enabled": true,
+      "model": "auto"
     },
     "security_reviewer": {
-      "enabled": true
+      "enabled": true,
+      "model": "opus"
     }
   },
   "project_kickoff_questions": 18,
@@ -31,5 +36,13 @@
   "cli": {
     "timeout_seconds": 300,
     "dangerously_skip_permissions": true
+  },
+  "model_routing": {
+    "enabled": true,
+    "default": "opus",
+    "models": {
+      "fast": "claude-sonnet-4-20250514",
+      "powerful": "claude-opus-4-20250514"
+    }
   }
 }

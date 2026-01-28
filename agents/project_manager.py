@@ -10,7 +10,7 @@ class ProjectManagerAgent(BaseAgent):
     creates specs and todo lists, and manages task flow.
     """
 
-    def __init__(self, activity_callback=None):
+    def __init__(self, activity_callback=None, model_preference: str = "opus"):
         system_prompt = """You are the Project Manager for an agentic software development team. Your responsibilities:
 
 1. **Project Kickoff**: For new projects, ask 15-20 questions to understand requirements, then create:
@@ -45,7 +45,8 @@ When asking kickoff questions, ask ONE question at a time and wait for the respo
             name="project_manager",
             role="Project Manager",
             system_prompt=system_prompt,
-            activity_callback=activity_callback
+            activity_callback=activity_callback,
+            model_preference=model_preference
         )
 
     def get_capabilities(self) -> List[str]:

@@ -16,17 +16,34 @@ class BaseAgent(ABC):
     Uses Claude Code CLI for execution, leveraging your existing subscription.
     """
 
+    # Keywords that suggest a task needs more reasoning power (use Opus)
+    COMPLEX_KEYWORDS = [
+        'architect', 'design', 'debug', 'security', 'review', 'analyze',
+        'refactor', 'optimize', 'why', 'explain', 'investigate', 'complex',
+        'integrate', 'migrate', 'plan', 'strategy', 'decision', 'tradeoff',
+        'authentication', 'authorization', 'encryption', 'vulnerability'
+    ]
+
+    # Keywords that suggest a straightforward task (use Sonnet)
+    SIMPLE_KEYWORDS = [
+        'create file', 'write', 'add', 'update', 'edit', 'rename', 'delete',
+        'css', 'style', 'html', 'template', 'copy', 'move', 'format',
+        'install', 'run', 'execute', 'build', 'test', 'lint'
+    ]
+
     def __init__(
         self,
         name: str,
         role: str,
         system_prompt: str = "",
-        activity_callback: Optional[Callable] = None
+        activity_callback: Optional[Callable] = None,
+        model_preference: str = "auto"
     ):
         self.name = name
         self.role = role
         self.system_prompt = system_prompt
         self.activity_callback = activity_callback
+        self.model_preference = model_preference  # "auto", "opus", or "sonnet"
         self.conversation_history: List[Dict[str, Any]] = []
 
     def log_activity(self, action: str, details: str = ""):
@@ -75,13 +92,71 @@ class BaseAgent(ABC):
 
         return "\n".join(prompt_parts)
 
+    def _classify_task_complexity(self, task: str) -> str:
+        """
+        Classify task complexity to determine which model to use.
+        Returns: 'simple' (use Sonnet) or 'complex' (use Opus)
+        """
+        task_lower = task.lower()
+
+        # Check for complex keywords first (these take priority)
+        complex_score = sum(1 for kw in self.COMPLEX_KEYWORDS if kw in task_lower)
+
+        # Check for simple keywords
+        simple_score = sum(1 for kw in self.SIMPLE_KEYWORDS if kw in task_lower)
+
+        # If task is long or has multiple parts, lean toward Opus
+        if len(task) > 500 or task.count('\n') > 10:
+            complex_score += 2
+
+        # Decision logic
+        if complex_score > simple_score:
+            return 'complex'
+        elif simple_score > 0 and complex_score == 0:
+            return 'simple'
+        else:
+            # Default to complex if unclear (safer)
+            return 'complex'
+
+    def _get_model_for_task(self, task: str, config: Optional[Dict] = None) -> Optional[str]:
+        """
+        Determine which model to use for this task.
+        Returns model name or None to use CLI default.
+        """
+        # If model routing is disabled or no config, use default
+        if not config:
+            return None
+
+        model_routing = config.get('model_routing', {})
+        if not model_routing.get('enabled', False):
+            return None
+
+        # Check agent's model preference
+        if self.model_preference == 'opus':
+            return model_routing.get('models', {}).get('powerful')
+        elif self.model_preference == 'sonnet':
+            return model_routing.get('models', {}).get('fast')
+        elif self.model_preference == 'auto':
+            # Auto-classify based on task
+            complexity = self._classify_task_complexity(task)
+            if complexity == 'simple':
+                model = model_routing.get('models', {}).get('fast')
+                self.log_activity("Model selection", f"Using Sonnet (simple task)")
+            else:
+                model = model_routing.get('models', {}).get('powerful')
+                self.log_activity("Model selection", f"Using Opus (complex task)")
+            return model
+
+        return None
+
     async def process_task(
         self,
         task: str,
         project_path: str,
         context: str = "",
         orchestrator: Any = None,
-        timeout: int = 300
+        timeout: int = 300,
+        config: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
         Process a task using Claude Code CLI.
@@ -90,6 +165,9 @@ class BaseAgent(ABC):
         running commands, etc.) so we just need to invoke it with the right prompt.
         """
         self.log_activity("Starting task", task[:100])
+
+        # Determine which model to use
+        model = self._get_model_for_task(task, config)
 
         # Build the prompt
         prompt = self._build_prompt(task, context)
@@ -105,7 +183,7 @@ class BaseAgent(ABC):
                 # --print: non-interactive, outputs result
                 # --dangerously-skip-permissions: allows autonomous operation
                 result = await asyncio.wait_for(
-                    self._run_claude_cli(prompt_file, project_path),
+                    self._run_claude_cli(prompt_file, project_path, model=model),
                     timeout=timeout
                 )
 
@@ -137,7 +215,7 @@ class BaseAgent(ABC):
                 "agent": self.name
             }
 
-    async def _run_claude_cli(self, prompt_file: str, working_dir: str) -> str:
+    async def _run_claude_cli(self, prompt_file: str, working_dir: str, model: Optional[str] = None) -> str:
         """Run Claude CLI and return the output."""
 
         # Read prompt from file
@@ -150,29 +228,65 @@ class BaseAgent(ABC):
         cmd = [
             "claude",
             "--print",
-            "--dangerously-skip-permissions",
-            prompt_content
+            "--dangerously-skip-permissions"
         ]
 
-        self.log_activity("Invoking Claude CLI", f"Working dir: {working_dir}")
+        # Add model flag if specified
+        if model:
+            cmd.extend(["--model", model])
+
+        cmd.append(prompt_content)
+
+        model_info = f" (model: {model})" if model else ""
+        self.log_activity("Invoking Claude CLI", f"Working dir: {working_dir}{model_info}")
+
+        # Set up environment with UTF-8 encoding for Windows compatibility
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONUTF8'] = '1'
 
         # Run the command
         process = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=working_dir,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            env=env
         )
 
         stdout, stderr = await process.communicate()
 
+        # Decode with error handling for special characters
         output = stdout.decode('utf-8', errors='replace')
         if stderr:
             error_output = stderr.decode('utf-8', errors='replace')
             if error_output.strip():
                 output += f"\n\nStderr:\n{error_output}"
 
+        # Clean any problematic characters that might cause issues downstream
+        output = self._sanitize_output(output)
+
         return output
+
+    def _sanitize_output(self, text: str) -> str:
+        """Remove or replace characters that might cause encoding issues."""
+        if not text:
+            return text
+        # Replace common problematic Unicode characters with ASCII equivalents
+        replacements = {
+            '\u2018': "'",  # Left single quote
+            '\u2019': "'",  # Right single quote
+            '\u201c': '"',  # Left double quote
+            '\u201d': '"',  # Right double quote
+            '\u2013': '-',  # En dash
+            '\u2014': '--', # Em dash
+            '\u2026': '...', # Ellipsis
+            '\u00a0': ' ',  # Non-breaking space
+        }
+        for char, replacement in replacements.items():
+            text = text.replace(char, replacement)
+        # Remove any remaining non-ASCII characters that might cause issues
+        return text.encode('ascii', errors='replace').decode('ascii')
 
     async def ask_question(
         self,

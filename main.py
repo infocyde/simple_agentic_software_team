@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from core.orchestrator import Orchestrator
 from core.project import ProjectManager
+from core.conversation import ConversationManager
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +26,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Global state
 active_orchestrators: Dict[str, Orchestrator] = {}
+active_conversations: Dict[str, ConversationManager] = {}
 websocket_connections: List[WebSocket] = []
 project_manager = ProjectManager(BASE_DIR)
 
@@ -38,6 +40,7 @@ with open(config_path, 'r') as f:
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("Agentic Software Team starting up...")
+    print(f"Open http://localhost:8000 in your browser")
     yield
     print("Shutting down...")
 
@@ -60,39 +63,43 @@ class CreateProjectRequest(BaseModel):
 
 
 class MessageRequest(BaseModel):
-    project: str
     message: str
 
 
-class HumanInputResponse(BaseModel):
-    project: str
-    response: str
+class ChatRequest(BaseModel):
+    message: str
 
 
 # WebSocket connection manager
-async def broadcast_activity(activity: Dict[str, Any]):
-    """Broadcast activity to all connected WebSocket clients."""
+async def broadcast_message(message: Dict[str, Any]):
+    """Broadcast a message to all connected WebSocket clients."""
+    disconnected = []
     for websocket in websocket_connections:
         try:
-            await websocket.send_json(activity)
+            await websocket.send_json(message)
         except Exception:
-            pass
+            disconnected.append(websocket)
+
+    # Clean up disconnected sockets
+    for ws in disconnected:
+        if ws in websocket_connections:
+            websocket_connections.remove(ws)
 
 
 def create_activity_callback(project_name: str):
     """Create an activity callback for a specific project."""
     def callback(activity: Dict[str, Any]):
         activity["project"] = project_name
-        asyncio.create_task(broadcast_activity(activity))
+        activity["type"] = "activity"
+        asyncio.create_task(broadcast_message(activity))
     return callback
 
 
-def create_human_input_callback(project_name: str):
-    """Create a human input callback for a specific project."""
-    def callback(request: Dict[str, Any]):
-        request["project"] = project_name
-        request["type"] = "human_input_needed"
-        asyncio.create_task(broadcast_activity(request))
+async def create_message_callback(project_name: str):
+    """Create a message callback for conversation manager."""
+    async def callback(message: Dict[str, Any]):
+        message["project"] = project_name
+        await broadcast_message(message)
     return callback
 
 
@@ -117,15 +124,6 @@ async def list_projects():
 async def create_project(req: CreateProjectRequest):
     """Create a new project."""
     result = project_manager.create_project(req.name)
-    if result["status"] == "success":
-        # Initialize orchestrator for the new project
-        orchestrator = Orchestrator(
-            project_path=result["path"],
-            config=config,
-            activity_callback=create_activity_callback(result["name"]),
-            human_input_callback=create_human_input_callback(result["name"])
-        )
-        active_orchestrators[result["name"]] = orchestrator
     return result
 
 
@@ -144,7 +142,7 @@ async def get_project_spec(name: str):
 
     spec_path = os.path.join(project_path, "SPEC.md")
     if os.path.exists(spec_path):
-        with open(spec_path, 'r') as f:
+        with open(spec_path, 'r', encoding='utf-8') as f:
             return {"spec": f.read()}
     return {"spec": ""}
 
@@ -158,7 +156,7 @@ async def get_project_todo(name: str):
 
     todo_path = os.path.join(project_path, "TODO.md")
     if os.path.exists(todo_path):
-        with open(todo_path, 'r') as f:
+        with open(todo_path, 'r', encoding='utf-8') as f:
             return {"todo": f.read()}
     return {"todo": ""}
 
@@ -173,83 +171,152 @@ async def get_project_activity(name: str, limit: int = 50):
 
 @app.post("/api/projects/{name}/kickoff")
 async def start_kickoff(name: str, req: MessageRequest):
-    """Start project kickoff with initial request."""
-    if name not in active_orchestrators:
-        project_path = project_manager.get_project_path(name)
-        if not project_path:
-            raise HTTPException(status_code=404, detail="Project not found")
+    """Start project kickoff with interactive Q&A."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-        active_orchestrators[name] = Orchestrator(
-            project_path=project_path,
-            config=config,
-            activity_callback=create_activity_callback(name),
-            human_input_callback=create_human_input_callback(name)
-        )
+    # Create message callback
+    async def message_callback(message: Dict[str, Any]):
+        message["project"] = name
+        await broadcast_message(message)
 
-    orchestrator = active_orchestrators[name]
+    # Create conversation manager
+    conversation = ConversationManager(
+        project_path=project_path,
+        message_callback=message_callback,
+        activity_callback=create_activity_callback(name)
+    )
 
-    # Run kickoff in background
-    asyncio.create_task(orchestrator.start_project_kickoff(req.message))
+    active_conversations[name] = conversation
 
-    return {"status": "started", "message": "Kickoff started"}
+    # Get number of questions from config
+    num_questions = config.get("project_kickoff_questions", 18)
+
+    # Start kickoff conversation in background
+    asyncio.create_task(conversation.start_kickoff_conversation(req.message, num_questions))
+
+    return {"status": "started", "message": "Kickoff conversation started"}
 
 
 @app.post("/api/projects/{name}/feature")
 async def start_feature(name: str, req: MessageRequest):
-    """Start a new feature request."""
-    if name not in active_orchestrators:
-        project_path = project_manager.get_project_path(name)
-        if not project_path:
-            raise HTTPException(status_code=404, detail="Project not found")
+    """Start a feature request with interactive Q&A."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
 
+    # Create message callback
+    async def message_callback(message: Dict[str, Any]):
+        message["project"] = name
+        await broadcast_message(message)
+
+    # Create conversation manager
+    conversation = ConversationManager(
+        project_path=project_path,
+        message_callback=message_callback,
+        activity_callback=create_activity_callback(name)
+    )
+
+    active_conversations[name] = conversation
+
+    # Get number of questions from config
+    num_questions = config.get("feature_kickoff_questions", 10)
+
+    # Start feature conversation in background
+    asyncio.create_task(conversation.start_feature_conversation(req.message, num_questions))
+
+    return {"status": "started", "message": "Feature conversation started"}
+
+
+@app.post("/api/projects/{name}/chat")
+async def send_chat_message(name: str, req: ChatRequest):
+    """Send a chat message to the active conversation."""
+    if name not in active_conversations:
+        raise HTTPException(status_code=404, detail="No active conversation for project")
+
+    conversation = active_conversations[name]
+
+    if not conversation.is_active:
+        raise HTTPException(status_code=400, detail="Conversation is not active")
+
+    # Pass the user's message to the conversation
+    conversation.receive_user_input(req.message)
+
+    return {"status": "received"}
+
+
+@app.post("/api/projects/{name}/write-spec")
+async def write_spec(name: str):
+    """Trigger spec and todo creation from current conversation."""
+    if name not in active_conversations:
+        raise HTTPException(status_code=404, detail="No active conversation for project")
+
+    conversation = active_conversations[name]
+
+    if not conversation.is_active:
+        raise HTTPException(status_code=400, detail="Conversation is not active")
+
+    # Signal to create the spec
+    conversation.trigger_spec_creation()
+
+    return {"status": "triggered", "message": "Creating spec and todo documents..."}
+
+
+@app.post("/api/projects/{name}/start-work")
+async def start_work(name: str):
+    """Start or continue working on the project."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Check if spec and todo exist
+    spec_path = os.path.join(project_path, "SPEC.md")
+    todo_path = os.path.join(project_path, "TODO.md")
+
+    if not os.path.exists(spec_path) or not os.path.exists(todo_path):
+        raise HTTPException(
+            status_code=400,
+            detail="Project needs SPEC.md and TODO.md before starting work. Run a kickoff first."
+        )
+
+    # Create message callback for work updates
+    async def work_message_callback(message: Dict[str, Any]):
+        message["project"] = name
+        await broadcast_message(message)
+
+    if name not in active_orchestrators:
         active_orchestrators[name] = Orchestrator(
             project_path=project_path,
             config=config,
             activity_callback=create_activity_callback(name),
-            human_input_callback=create_human_input_callback(name)
+            message_callback=work_message_callback
         )
 
     orchestrator = active_orchestrators[name]
 
-    # Run feature request in background
-    asyncio.create_task(orchestrator.start_feature_request(req.message))
+    # Start work in background
+    asyncio.create_task(orchestrator.start_work())
 
-    return {"status": "started", "message": "Feature request started"}
+    return {"status": "started", "message": "Work started"}
+
+
+@app.post("/api/projects/{name}/pause")
+async def pause_work(name: str):
+    """Pause work on the project (completes current task first)."""
+    if name not in active_orchestrators:
+        raise HTTPException(status_code=404, detail="No active work for this project")
+
+    orchestrator = active_orchestrators[name]
+    orchestrator.request_pause()
+
+    return {"status": "pausing", "message": "Will pause after current task completes"}
 
 
 @app.post("/api/projects/{name}/continue")
 async def continue_work(name: str):
-    """Continue working on the project."""
-    if name not in active_orchestrators:
-        project_path = project_manager.get_project_path(name)
-        if not project_path:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        active_orchestrators[name] = Orchestrator(
-            project_path=project_path,
-            config=config,
-            activity_callback=create_activity_callback(name),
-            human_input_callback=create_human_input_callback(name)
-        )
-
-    orchestrator = active_orchestrators[name]
-
-    # Continue work in background
-    asyncio.create_task(orchestrator.continue_work())
-
-    return {"status": "started", "message": "Continuing work"}
-
-
-@app.post("/api/projects/{name}/human-input")
-async def provide_human_input(name: str, req: HumanInputResponse):
-    """Provide human input to a waiting agent."""
-    if name not in active_orchestrators:
-        raise HTTPException(status_code=404, detail="No active orchestrator for project")
-
-    orchestrator = active_orchestrators[name]
-    orchestrator.provide_human_input(req.response)
-
-    return {"status": "received"}
+    """Continue working on the project (alias for start-work)."""
+    return await start_work(name)
 
 
 @app.get("/api/config")
@@ -273,17 +340,18 @@ async def update_config(new_config: Dict[str, Any]):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time activity updates."""
+    """WebSocket endpoint for real-time updates."""
     await websocket.accept()
     websocket_connections.append(websocket)
 
     try:
         while True:
-            # Keep connection alive and receive any messages
+            # Keep connection alive
             data = await websocket.receive_text()
             # Could handle incoming messages here if needed
     except WebSocketDisconnect:
-        websocket_connections.remove(websocket)
+        if websocket in websocket_connections:
+            websocket_connections.remove(websocket)
 
 
 if __name__ == "__main__":
