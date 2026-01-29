@@ -394,4 +394,4 @@ MIT
 
 ---
 
-**Built with Claude Code, for Claude Code users.**
+**Built with Claude Code, for Claude Code users. Also reviewed and updated by OpenAI Codex. Opus rules but Codex is faster and a better architect.**
