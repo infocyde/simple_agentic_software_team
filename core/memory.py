@@ -89,10 +89,14 @@ class MemoryManager:
         with open(self.memory_file, 'w') as f:
             f.write(content)
 
-    def get_context_for_task(self, task: str) -> str:
+    def get_context_for_task(self, task: str, section: Optional[str] = None) -> str:
         """
         Get minimal, relevant context for a specific task.
         This keeps token usage low by only providing what's needed.
+
+        Args:
+            task: The task text
+            section: Optional section name to filter TODO tasks (e.g., "## Setup")
         """
         context_parts = []
 
@@ -111,14 +115,54 @@ class MemoryManager:
                 spec = spec[:500] + "\n... (spec truncated, read SPEC.md for full details)"
             context_parts.append(f"Project spec (summary):\n{spec}")
 
-        # Include current TODO status
+        # Include only relevant TODO items (current section, uncompleted only)
         todo_path = os.path.join(self.project_path, "TODO.md")
         if os.path.exists(todo_path):
             with open(todo_path, 'r') as f:
-                todo = f.read()
-            context_parts.append(f"Current TODO:\n{todo}")
+                todo_content = f.read()
+
+            filtered_todo = self._filter_todo_for_section(todo_content, section)
+            if filtered_todo:
+                context_parts.append(f"Related tasks in this section:\n{filtered_todo}")
 
         return "\n\n---\n\n".join(context_parts) if context_parts else ""
+
+    def _filter_todo_for_section(self, todo_content: str, section: Optional[str]) -> str:
+        """
+        Filter TODO.md to only include uncompleted tasks from the specified section.
+        This reduces token usage by excluding completed tasks and unrelated sections.
+        """
+        lines = todo_content.split('\n')
+
+        # If no section specified, just return uncompleted tasks (still saves tokens)
+        if not section:
+            uncompleted = [line for line in lines if '[ ]' in line]
+            return '\n'.join(uncompleted[:10])  # Max 10 tasks for general context
+
+        # Normalize section name for matching
+        section_normalized = section.lower().strip()
+        if not section_normalized.startswith('##'):
+            section_normalized = '## ' + section_normalized.lstrip('#').strip()
+
+        # Find the section and extract uncompleted tasks
+        in_target_section = False
+        section_tasks = []
+
+        for line in lines:
+            # Check for section headers
+            if line.strip().startswith('##'):
+                # Check if this is our target section
+                if section_normalized in line.lower() or line.lower().strip().startswith(section_normalized):
+                    in_target_section = True
+                else:
+                    in_target_section = False
+                continue
+
+            # If in target section, collect uncompleted tasks only
+            if in_target_section and '[ ]' in line:
+                section_tasks.append(line)
+
+        return '\n'.join(section_tasks)
 
     def get_project_summary(self) -> str:
         """Get a brief summary of the project state."""

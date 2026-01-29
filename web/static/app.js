@@ -69,6 +69,9 @@ class AgenticTeamApp {
                     timestamp: new Date().toISOString()
                 });
                 this.loadProjectData();
+                this.showCompletionToast(data.message || 'All tasks completed!');
+                this.showBrowserNotification('Project Complete', data.message || 'All tasks have been completed.');
+                this.loadAndShowSummary();
                 break;
 
             case 'work_paused':
@@ -120,6 +123,10 @@ class AgenticTeamApp {
                 this.setWaitingForInput(false);
                 break;
 
+            case 'user_escalation':
+                this.handleTaskEscalation(data);
+                break;
+
             default:
                 // Legacy activity format
                 if (data.agent && data.action) {
@@ -140,9 +147,13 @@ class AgenticTeamApp {
             this.addActivityItem(data);
         }
 
-        // Refresh project data periodically
-        if (data.action && (data.action.includes('Wrote file') || data.action.includes('complete'))) {
-            setTimeout(() => this.loadProjectData(), 500);
+        // Refresh project data on file writes (slight delay to batch rapid updates)
+        if (data.action && data.action.includes('Wrote file')) {
+            setTimeout(() => this.loadProjectData(), 150);
+        }
+        // Refresh immediately on task completion
+        if (data.action && data.action.includes('Task completed')) {
+            this.loadProjectData();
         }
     }
 
@@ -489,7 +500,7 @@ class AgenticTeamApp {
 
             if (this.activeAgents.size > 0) {
                 const agentNames = Array.from(this.activeAgents).map(a => this.formatAgentName(a));
-                text.textContent = `Working... (${this.activeAgents.size} active)`;
+                text.textContent = `Working... (${this.activeAgents.size} instance${this.activeAgents.size !== 1 ? 's' : ''} running)`;
                 agents.textContent = agentNames.join(', ');
             } else {
                 text.textContent = 'Working...';
@@ -676,6 +687,161 @@ class AgenticTeamApp {
         } else {
             startBtn.style.display = 'inline-block';
             pauseBtn.style.display = 'none';
+        }
+    }
+
+    // Completion notification methods
+    showCompletionToast(message) {
+        // Remove existing toast if any
+        const existingToast = document.getElementById('completionToast');
+        if (existingToast) existingToast.remove();
+
+        const toast = document.createElement('div');
+        toast.id = 'completionToast';
+        toast.className = 'completion-toast';
+        toast.innerHTML = `
+            <div class="toast-icon">&#10003;</div>
+            <div class="toast-content">
+                <div class="toast-title">Project Complete!</div>
+                <div class="toast-message">${this.escapeHtml(message)}</div>
+            </div>
+            <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
+        `;
+
+        document.body.appendChild(toast);
+
+        // Trigger animation
+        setTimeout(() => toast.classList.add('show'), 10);
+
+        // Auto-remove after 10 seconds
+        setTimeout(() => {
+            if (toast.parentElement) {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }
+        }, 10000);
+    }
+
+    showBrowserNotification(title, body) {
+        // Check if notifications are supported and permitted
+        if (!('Notification' in window)) return;
+
+        if (Notification.permission === 'granted') {
+            new Notification(title, {
+                body: body,
+                icon: '/static/favicon.ico',
+                tag: 'project-complete'
+            });
+        } else if (Notification.permission !== 'denied') {
+            Notification.requestPermission().then(permission => {
+                if (permission === 'granted') {
+                    new Notification(title, {
+                        body: body,
+                        icon: '/static/favicon.ico',
+                        tag: 'project-complete'
+                    });
+                }
+            });
+        }
+    }
+
+    async loadAndShowSummary() {
+        if (!this.currentProject) return;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/summary`);
+            const data = await res.json();
+
+            if (data.summary) {
+                // Switch to spec tab and show summary
+                this.switchTab('spec');
+                document.getElementById('specContent').textContent = data.summary;
+            }
+        } catch (error) {
+            console.log('No summary available yet');
+        }
+    }
+
+    handleTaskEscalation(data) {
+        // Show escalation modal
+        this.showEscalationModal(data.task, data.error, data.message);
+
+        // Also add to activity feed
+        this.addActivityItem({
+            agent: 'system',
+            action: 'Task failed - awaiting your decision',
+            details: data.task,
+            timestamp: new Date().toISOString()
+        });
+    }
+
+    showEscalationModal(task, error, message) {
+        // Create escalation modal if it doesn't exist
+        let modal = document.getElementById('escalationModal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'escalationModal';
+            modal.className = 'modal escalation-modal';
+            modal.innerHTML = `
+                <h3 class="escalation-title">Task Failed - Your Input Needed</h3>
+                <div class="escalation-content">
+                    <div class="escalation-task">
+                        <strong>Task:</strong>
+                        <p id="escalationTask"></p>
+                    </div>
+                    <div class="escalation-error">
+                        <strong>Error:</strong>
+                        <p id="escalationError"></p>
+                    </div>
+                </div>
+                <div class="escalation-options">
+                    <button class="btn escalation-btn" data-action="retry">Retry</button>
+                    <button class="btn escalation-btn" data-action="skip">Skip</button>
+                    <button class="btn escalation-btn" data-action="modify">Modify Task</button>
+                    <button class="btn escalation-btn" data-action="remove">Remove Task</button>
+                    <button class="btn escalation-btn btn-danger" data-action="stop">Stop Work</button>
+                </div>
+            `;
+
+            // Add click handlers
+            modal.querySelectorAll('.escalation-btn').forEach(btn => {
+                btn.addEventListener('click', () => this.sendTaskDecision(btn.dataset.action));
+            });
+
+            document.getElementById('modalOverlay').appendChild(modal);
+        }
+
+        // Update content
+        document.getElementById('escalationTask').textContent = task || 'Unknown task';
+        document.getElementById('escalationError').textContent = error || 'Unknown error';
+
+        // Show modal
+        document.getElementById('modalOverlay').style.display = 'flex';
+        modal.style.display = 'block';
+    }
+
+    async sendTaskDecision(decision) {
+        if (!this.currentProject) return;
+
+        try {
+            await fetch(`/api/projects/${this.currentProject}/task-decision`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: decision })
+            });
+
+            // Hide modal
+            this.hideModals();
+
+            // Add to activity
+            this.addActivityItem({
+                agent: 'system',
+                action: `User decision: ${decision}`,
+                timestamp: new Date().toISOString()
+            });
+
+        } catch (error) {
+            console.error('Error sending decision:', error);
         }
     }
 }

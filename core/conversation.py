@@ -398,9 +398,12 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
    - Any constraints or requirements mentioned
 
 2. TODO.md - A task list with checkboxes for implementation:
-   - Break down the work into clear, actionable tasks
+   - IMPORTANT: Be CONCISE. Each task triggers a separate API call (costs tokens and rate limits).
+   - Aim for the MINIMUM number of tasks needed - group related work into single tasks.
+   - Maximum 50 tasks, but strongly prefer fewer (10-30 is ideal for most projects).
+   - Each task should represent a meaningful chunk of work, not tiny steps.
    - Use [ ] for uncompleted tasks
-   - Group related tasks together
+   - Group related tasks into sections with ## headers
 
 --- Conversation ---
 """

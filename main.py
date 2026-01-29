@@ -169,6 +169,20 @@ async def get_project_activity(name: str, limit: int = 50):
     return {"activity": []}
 
 
+@app.get("/api/projects/{name}/summary")
+async def get_project_summary(name: str):
+    """Get project summary (generated on completion)."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    summary_path = os.path.join(project_path, "SUMMARY.md")
+    if os.path.exists(summary_path):
+        with open(summary_path, 'r', encoding='utf-8') as f:
+            return {"summary": f.read()}
+    return {"summary": ""}
+
+
 @app.post("/api/projects/{name}/kickoff")
 async def start_kickoff(name: str, req: MessageRequest):
     """Start project kickoff with interactive Q&A."""
@@ -311,6 +325,18 @@ async def pause_work(name: str):
     orchestrator.request_pause()
 
     return {"status": "pausing", "message": "Will pause after current task completes"}
+
+
+@app.post("/api/projects/{name}/task-decision")
+async def task_decision(name: str, req: ChatRequest):
+    """Receive user decision for a failed task escalation."""
+    if name not in active_orchestrators:
+        raise HTTPException(status_code=404, detail="No active work for this project")
+
+    orchestrator = active_orchestrators[name]
+    orchestrator.receive_user_decision(req.message)
+
+    return {"status": "received", "message": "Decision received"}
 
 
 @app.post("/api/projects/{name}/continue")

@@ -17,18 +17,23 @@ class BaseAgent(ABC):
     """
 
     # Keywords that suggest a task needs more reasoning power (use Opus)
+    # Keep this list tight - only truly complex tasks
     COMPLEX_KEYWORDS = [
-        'architect', 'design', 'debug', 'security', 'review', 'analyze',
-        'refactor', 'optimize', 'why', 'explain', 'investigate', 'complex',
-        'integrate', 'migrate', 'plan', 'strategy', 'decision', 'tradeoff',
-        'authentication', 'authorization', 'encryption', 'vulnerability'
+        'architect', 'debug', 'security', 'vulnerability', 'review',
+        'refactor', 'optimize', 'investigate', 'complex',
+        'integrate', 'migrate', 'authentication', 'authorization', 'encryption'
     ]
 
     # Keywords that suggest a straightforward task (use Sonnet)
+    # Expanded - most implementation work is straightforward
     SIMPLE_KEYWORDS = [
-        'create file', 'write', 'add', 'update', 'edit', 'rename', 'delete',
-        'css', 'style', 'html', 'template', 'copy', 'move', 'format',
-        'install', 'run', 'execute', 'build', 'test', 'lint'
+        'create', 'write', 'add', 'update', 'edit', 'rename', 'delete', 'remove',
+        'css', 'style', 'html', 'template', 'component', 'page', 'view',
+        'copy', 'move', 'format', 'install', 'run', 'execute', 'build', 'test',
+        'lint', 'implement', 'setup', 'configure', 'endpoint', 'route', 'api',
+        'model', 'schema', 'migration', 'seed', 'fixture', 'mock',
+        'button', 'form', 'input', 'list', 'table', 'card', 'modal', 'navbar',
+        'function', 'method', 'class', 'module', 'import', 'export'
     ]
 
     def __init__(
@@ -87,6 +92,7 @@ class BaseAgent(ABC):
         prompt_parts.append("## Instructions")
         prompt_parts.append("- Complete the task described above")
         prompt_parts.append("- Use the available tools (read/write files, run commands) as needed")
+        prompt_parts.append("- If you need current documentation: first run `python utils/search_docs.py '<library> <topic>'` to find URLs, then use WebFetch to read them")
         prompt_parts.append("- When finished, provide a brief summary of what you accomplished")
         prompt_parts.append("- If you encounter issues you cannot resolve, explain what went wrong")
 
@@ -109,14 +115,12 @@ class BaseAgent(ABC):
         if len(task) > 500 or task.count('\n') > 10:
             complex_score += 2
 
-        # Decision logic
-        if complex_score > simple_score:
+        # Decision logic - favor Sonnet for speed, Opus only when clearly needed
+        if complex_score > simple_score and complex_score >= 2:
             return 'complex'
-        elif simple_score > 0 and complex_score == 0:
-            return 'simple'
         else:
-            # Default to complex if unclear (safer)
-            return 'complex'
+            # Default to simple (Sonnet) - fast and capable for most tasks
+            return 'simple'
 
     def _get_model_for_task(self, task: str, config: Optional[Dict] = None) -> Optional[str]:
         """
@@ -155,7 +159,7 @@ class BaseAgent(ABC):
         project_path: str,
         context: str = "",
         orchestrator: Any = None,
-        timeout: int = 300,
+        timeout: int = 600,
         config: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
@@ -254,7 +258,17 @@ class BaseAgent(ABC):
             env=env
         )
 
-        stdout, stderr = await process.communicate()
+        # Start heartbeat task to log progress
+        heartbeat_task = asyncio.create_task(self._heartbeat_logger(process))
+
+        try:
+            stdout, stderr = await process.communicate()
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         # Decode with error handling for special characters
         output = stdout.decode('utf-8', errors='replace')
@@ -267,6 +281,24 @@ class BaseAgent(ABC):
         output = self._sanitize_output(output)
 
         return output
+
+    async def _heartbeat_logger(self, process):
+        """Log periodic heartbeat messages while a process is running."""
+        elapsed = 0
+        interval = 30  # Log every 30 seconds
+        try:
+            while process.returncode is None:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                minutes = elapsed // 60
+                seconds = elapsed % 60
+                if minutes > 0:
+                    time_str = f"{minutes}m {seconds}s"
+                else:
+                    time_str = f"{seconds}s"
+                self.log_activity("Still working...", f"Elapsed: {time_str}")
+        except asyncio.CancelledError:
+            pass
 
     def _sanitize_output(self, text: str) -> str:
         """Remove or replace characters that might cause encoding issues."""
