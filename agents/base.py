@@ -285,7 +285,7 @@ class BaseAgent(ABC):
     async def _heartbeat_logger(self, process):
         """Log periodic heartbeat messages while a process is running."""
         elapsed = 0
-        interval = 30  # Log every 30 seconds
+        interval = 45  # Log every 45 seconds
         try:
             while process.returncode is None:
                 await asyncio.sleep(interval)

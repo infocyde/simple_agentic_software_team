@@ -12,6 +12,44 @@ body {
     min-height: 100vh;
 }
 
+.splash-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+    transition: opacity 0.8s ease;
+    pointer-events: auto;
+}
+
+.splash-overlay.fade-out {
+    opacity: 0;
+}
+
+.splash-backdrop {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 40% 30%, #1a6ea0 0%, #0b1b2b 45%, #05070b 100%);
+}
+
+.splash-content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.splash-logo {
+    width: min(60vw, 380px);
+    height: auto;
+    filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.55));
+    border-radius: 50%;
+}
+
 .container {
     max-width: 1600px;
     margin: 0 auto;
@@ -324,6 +362,41 @@ header h1 {
 .project-actions {
     display: flex;
     gap: 10px;
+}
+
+/* Quality Gates */
+.quality-gates {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    background: #1a1a2e;
+    border: 1px solid #24314d;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 15px;
+}
+
+.gate-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #bbb;
+    font-size: 0.85rem;
+}
+
+.gate-toggle input {
+    accent-color: #0f4c75;
+}
+
+.btn-small {
+    padding: 6px 10px;
+    font-size: 0.8rem;
+}
+
+.gates-status {
+    color: #7aa4c7;
+    font-size: 0.8rem;
 }
 
 /* Tabs */

@@ -17,6 +17,7 @@ class MemoryManager:
     def __init__(self, project_path: str):
         self.project_path = project_path
         self.memory_file = os.path.join(project_path, "MEMORY.md")
+        self._file_cache: Dict[str, Dict[str, Any]] = {}
         self._ensure_memory_file()
 
     def _ensure_memory_file(self):
@@ -107,9 +108,8 @@ class MemoryManager:
 
         # Include spec summary if it exists
         spec_path = os.path.join(self.project_path, "SPEC.md")
-        if os.path.exists(spec_path):
-            with open(spec_path, 'r') as f:
-                spec = f.read()
+        spec = self._read_file_cached(spec_path)
+        if spec is not None:
             # Only include first ~500 chars of spec for context
             if len(spec) > 500:
                 spec = spec[:500] + "\n... (spec truncated, read SPEC.md for full details)"
@@ -117,9 +117,8 @@ class MemoryManager:
 
         # Include only relevant TODO items (current section, uncompleted only)
         todo_path = os.path.join(self.project_path, "TODO.md")
-        if os.path.exists(todo_path):
-            with open(todo_path, 'r') as f:
-                todo_content = f.read()
+        todo_content = self._read_file_cached(todo_path)
+        if todo_content is not None:
 
             filtered_todo = self._filter_todo_for_section(todo_content, section)
             if filtered_todo:
@@ -175,17 +174,15 @@ class MemoryManager:
 
         # TODO status
         todo_path = os.path.join(self.project_path, "TODO.md")
-        if os.path.exists(todo_path):
-            with open(todo_path, 'r') as f:
-                todo = f.read()
+        todo = self._read_file_cached(todo_path)
+        if todo is not None:
             completed = todo.count("[x]")
             total = todo.count("[ ]") + completed
             summary_parts.append(f"- TODO: {completed}/{total} tasks completed")
 
         # Memory entries
-        if os.path.exists(self.memory_file):
-            with open(self.memory_file, 'r') as f:
-                memory = f.read()
+        memory = self._read_file_cached(self.memory_file)
+        if memory is not None:
             decision_count = memory.count("**") // 2  # rough count
             summary_parts.append(f"- Memory: ~{decision_count} decisions recorded")
 
@@ -193,11 +190,9 @@ class MemoryManager:
 
     def _get_recent_decisions(self, count: int) -> List[str]:
         """Get the most recent decisions."""
-        if not os.path.exists(self.memory_file):
+        content = self._read_file_cached(self.memory_file)
+        if content is None:
             return []
-
-        with open(self.memory_file, 'r') as f:
-            content = f.read()
 
         decisions = []
         marker = "## Decisions\n"
@@ -215,6 +210,28 @@ class MemoryManager:
                         break
 
         return decisions
+
+    def _read_file_cached(self, path: str) -> Optional[str]:
+        """Read a file with a simple mtime-based cache to reduce disk I/O."""
+        try:
+            if not os.path.exists(path):
+                # Clear cache entry if file was removed
+                if path in self._file_cache:
+                    del self._file_cache[path]
+                return None
+
+            mtime = os.path.getmtime(path)
+            cached = self._file_cache.get(path)
+            if cached and cached.get("mtime") == mtime:
+                return cached.get("content")
+
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            self._file_cache[path] = {"mtime": mtime, "content": content}
+            return content
+        except Exception:
+            return None
 
     def clear_memory(self):
         """Clear all memory (use with caution)."""

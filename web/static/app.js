@@ -17,6 +17,7 @@ class AgenticTeamApp {
     init() {
         this.connectWebSocket();
         this.bindEvents();
+        this.initSplash();
     }
 
     connectWebSocket() {
@@ -191,6 +192,7 @@ class AgenticTeamApp {
         document.getElementById('completeUatBtn').addEventListener('click', () => this.completeUat());
         document.getElementById('cancelMessage').addEventListener('click', () => this.hideModals());
         document.getElementById('messageForm').addEventListener('submit', (e) => this.startConversation(e));
+        document.getElementById('saveGatesBtn').addEventListener('click', () => this.saveQualityGates());
 
         // Chat form
         document.getElementById('chatForm').addEventListener('submit', (e) => this.sendChatMessage(e));
@@ -265,6 +267,11 @@ class AgenticTeamApp {
             if (statusData.status) {
                 this.updateStatusDisplay(statusData.status.current_status);
             }
+
+            // Load quality gates (per project)
+            const gatesRes = await fetch(`/api/projects/${this.currentProject}/quality-gates`);
+            const gatesData = await gatesRes.json();
+            this.updateQualityGatesUI(gatesData.quality_gates || {});
 
         } catch (error) {
             console.error('Error loading project data:', error);
@@ -917,6 +924,46 @@ class AgenticTeamApp {
         }
     }
 
+    updateQualityGatesUI(qualityGates) {
+        const security = document.getElementById('gateSecurity');
+        const qa = document.getElementById('gateQa');
+        const tests = document.getElementById('gateTests');
+        if (!security || !qa || !tests) return;
+
+        security.checked = qualityGates.run_security_review !== false;
+        qa.checked = qualityGates.run_qa_review !== false;
+        tests.checked = qualityGates.run_tests !== false;
+    }
+
+    async saveQualityGates() {
+        const status = document.getElementById('gatesStatus');
+        const security = document.getElementById('gateSecurity').checked;
+        const qa = document.getElementById('gateQa').checked;
+        const tests = document.getElementById('gateTests').checked;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/quality-gates`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    run_security_review: security,
+                    run_qa_review: qa,
+                    run_tests: tests
+                })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                status.textContent = 'Saved';
+                setTimeout(() => { status.textContent = ''; }, 1500);
+            } else {
+                status.textContent = 'Error';
+            }
+        } catch (error) {
+            console.error('Error saving gates:', error);
+            status.textContent = 'Error';
+        }
+    }
+
     // Completion notification methods
     showCompletionToast(message) {
         // Remove existing toast if any
@@ -956,7 +1003,7 @@ class AgenticTeamApp {
         if (Notification.permission === 'granted') {
             new Notification(title, {
                 body: body,
-                icon: '/static/favicon.ico',
+                icon: '/static/favicon.png',
                 tag: 'project-complete'
             });
         } else if (Notification.permission !== 'denied') {
@@ -964,12 +1011,34 @@ class AgenticTeamApp {
                 if (permission === 'granted') {
                     new Notification(title, {
                         body: body,
-                        icon: '/static/favicon.ico',
+                        icon: '/static/favicon.png',
                         tag: 'project-complete'
                     });
                 }
             });
         }
+    }
+
+    initSplash() {
+        const overlay = document.getElementById('splashOverlay');
+        if (!overlay) return;
+
+        const storageKey = 'nightRoninSplashShown';
+        if (sessionStorage.getItem(storageKey)) {
+            overlay.style.display = 'none';
+            return;
+        }
+
+        overlay.style.display = 'flex';
+
+        setTimeout(() => {
+            overlay.classList.add('fade-out');
+        }, 1500);
+
+        setTimeout(() => {
+            overlay.style.display = 'none';
+            sessionStorage.setItem(storageKey, '1');
+        }, 2300);
     }
 
     async loadAndShowSummary() {

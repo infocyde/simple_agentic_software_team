@@ -71,6 +71,7 @@ class Orchestrator:
         # Pending human input requests
         self.pending_human_input: Optional[Dict[str, Any]] = None
         self.human_input_event = asyncio.Event()
+        self.todo_lock = asyncio.Lock()
 
         # Work state
         self.is_working = False
@@ -87,7 +88,16 @@ class Orchestrator:
         self.max_concurrent = exec_config.get('max_concurrent_agents', 3)
         self.task_timeout = exec_config.get('task_timeout_seconds', 120)
         self.max_task_retries = exec_config.get('max_task_retries', 3)
+        self.allow_cross_section_parallel = exec_config.get('allow_cross_section_parallel', True)
+        self.enable_task_batching = exec_config.get('enable_task_batching', True)
+        self.task_batch_size = exec_config.get('task_batch_size', 2)
         self.semaphore = asyncio.Semaphore(self.max_concurrent)
+        self.testing_strategy = config.get("defaults", {}).get("testing_strategy", "critical_paths")
+        default_gates = config.get("quality_gates", {})
+        project_gates = self.project_manager_core.get_quality_gates(self.project_name)
+        merged_gates = default_gates.copy()
+        merged_gates.update(project_gates or {})
+        self.quality_gates = merged_gates
 
         # Initialize agents
         self._init_agents()
@@ -240,15 +250,16 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
         if not os.path.exists(todo_path):
             return
 
-        async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
+        async with self.todo_lock:
+            async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
 
-        old_line = f"- [ ] {old_task}"
-        new_line = f"- [ ] {new_task}"
-        content = content.replace(old_line, new_line)
+            old_line = f"- [ ] {old_task}"
+            new_line = f"- [ ] {new_task}"
+            content = content.replace(old_line, new_line)
 
-        async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
-            await f.write(content)
+            async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
+                await f.write(content)
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -263,16 +274,17 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
         if not os.path.exists(todo_path):
             return
 
-        async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
+        async with self.todo_lock:
+            async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
 
-        # Remove the task line
-        old_line = f"- [ ] {task_text}"
-        content = content.replace(old_line + "\n", "")
-        content = content.replace(old_line, "")  # In case it's the last line
+            # Remove the task line
+            old_line = f"- [ ] {task_text}"
+            content = content.replace(old_line + "\n", "")
+            content = content.replace(old_line, "")  # In case it's the last line
 
-        async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
-            await f.write(content)
+            async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
+                await f.write(content)
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -284,7 +296,7 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
     async def _estimate_task_complexity(self, task: str) -> str:
         """
         Estimate task complexity: small, medium, or large.
-        Uses quick heuristics first, then PM for uncertain cases.
+        Uses quick heuristics only (no LLM call) for speed.
         """
         task_lower = task.lower()
 
@@ -303,38 +315,7 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
             return "large"
 
         # For medium-complexity or uncertain tasks, ask PM for quick estimate
-        try:
-            pm = self.agents["project_manager"]
-            estimate_prompt = f"""Quickly estimate the complexity of this task. Reply with ONLY one word: small, medium, or large.
-
-Task: {task[:300]}
-
-Criteria:
-- small: Simple change, single file, < 5 minutes work
-- medium: Moderate change, few files, 5-30 minutes work
-- large: Complex change, multiple files/systems, > 30 minutes work
-
-Reply with one word only:"""
-
-            result = await pm.process_task(
-                task=estimate_prompt,
-                project_path=self.project_path,
-                context="",
-                orchestrator=self,
-                timeout=30  # Quick timeout for estimation
-            )
-
-            if result["status"] == "complete":
-                response = result["result"].strip().lower()
-                if "small" in response:
-                    return "small"
-                elif "large" in response:
-                    return "large"
-                return "medium"
-        except Exception:
-            pass
-
-        return "medium"  # Default to medium if estimation fails
+        return "medium"  # Default to medium for uncertain cases
 
     async def _split_large_task(self, task: str) -> List[str]:
         """Split a large task into smaller subtasks."""
@@ -344,44 +325,20 @@ Reply with one word only:"""
             "action": "Splitting large task",
             "details": task[:100]
         })
+        # Heuristic split for speed: split on sentence-like separators or "and then"
+        separators = ["\n", ";", " and then ", " then ", ". "]
+        parts = [task]
+        for sep in separators:
+            if sep in task:
+                parts = [p.strip() for p in task.split(sep) if p.strip()]
+                break
 
-        pm = self.agents["project_manager"]
+        # Keep reasonable subtasks only if we got multiple meaningful parts
+        if len(parts) >= 2:
+            subtasks = [p if p.endswith('.') else p for p in parts]
+            return subtasks[:4]
 
-        split_prompt = f"""This task is too large and needs to be split into smaller, independent subtasks.
-
-Original task: {task}
-
-Please split this into 2-4 smaller subtasks that:
-1. Can each be completed independently
-2. Together accomplish the original goal
-3. Are specific and actionable
-
-Reply with ONLY the subtasks, one per line, no numbering or bullets. Each line should be a complete task description."""
-
-        try:
-            result = await pm.process_task(
-                task=split_prompt,
-                project_path=self.project_path,
-                context="",
-                orchestrator=self,
-                timeout=60
-            )
-
-            if result["status"] == "complete":
-                subtasks = []
-                for line in result["result"].strip().split('\n'):
-                    line = line.strip()
-                    # Remove common prefixes
-                    line = line.lstrip('0123456789.-) ')
-                    if line and len(line) > 10:
-                        subtasks.append(line)
-
-                if len(subtasks) >= 2:
-                    return subtasks[:4]  # Max 4 subtasks
-        except Exception:
-            pass
-
-        # Fallback: return original task if splitting fails
+        # Fallback: return original task if splitting is not obvious
         return [task]
 
     async def _replace_task_with_subtasks(self, original_task: str, subtasks: List[str]):
@@ -390,17 +347,18 @@ Reply with ONLY the subtasks, one per line, no numbering or bullets. Each line s
         if not os.path.exists(todo_path):
             return
 
-        async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
+        async with self.todo_lock:
+            async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
 
-        # Build replacement text
-        old_line = f"- [ ] {original_task}"
-        new_lines = "\n".join([f"- [ ] {st}" for st in subtasks])
+            # Build replacement text
+            old_line = f"- [ ] {original_task}"
+            new_lines = "\n".join([f"- [ ] {st}" for st in subtasks])
 
-        content = content.replace(old_line, new_lines)
+            content = content.replace(old_line, new_lines)
 
-        async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
-            await f.write(content)
+            async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
+                await f.write(content)
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -764,7 +722,8 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
     def _get_parallel_tasks(self, max_tasks: int = None) -> List[Dict[str, Any]]:
         """
         Get a batch of tasks that can run in parallel.
-        Tasks in the same section are considered parallelizable.
+        Prefer tasks from the same section, but allow cross-section batching
+        to improve throughput when sections are small.
         """
         if max_tasks is None:
             max_tasks = self.max_concurrent
@@ -775,11 +734,76 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
         if not uncompleted:
             return []
 
-        # Get tasks from the same section (they're likely independent)
+        # Start with the first section for locality
         first_section = uncompleted[0]["section"]
-        same_section = [t for t in uncompleted if t["section"] == first_section]
+        batch: List[Dict[str, Any]] = []
 
-        return same_section[:max_tasks]
+        # Add tasks from the first section
+        for t in uncompleted:
+            if t["section"] == first_section:
+                batch.append(t)
+                if len(batch) >= max_tasks:
+                    return batch
+
+        if not self.allow_cross_section_parallel:
+            return batch
+
+        # Fill remaining slots with tasks from other sections, preserving order
+        for t in uncompleted:
+            if t["section"] != first_section:
+                batch.append(t)
+                if len(batch) >= max_tasks:
+                    break
+
+        return batch
+
+    def _is_small_task(self, task_text: str) -> bool:
+        """Heuristic to decide if a task is small enough to batch."""
+        text = task_text.lower().strip()
+        if len(text) > 90:
+            return False
+        large_indicators = [
+            "implement", "refactor", "migrate", "architecture", "integrate",
+            "authentication", "authorization", "database schema", "full crud",
+            "design and implement", "build complete"
+        ]
+        return not any(ind in text for ind in large_indicators)
+
+    def _batch_tasks_by_section(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Batch small tasks in the same section into a single work item."""
+        if not self.enable_task_batching or self.task_batch_size <= 1:
+            return tasks
+
+        batched: List[Dict[str, Any]] = []
+        i = 0
+        while i < len(tasks):
+            current = tasks[i]
+            section = current["section"]
+            group = [current]
+            j = i + 1
+            while j < len(tasks) and len(group) < self.task_batch_size:
+                candidate = tasks[j]
+                if candidate["section"] != section:
+                    break
+                if not self._is_small_task(candidate["text"]) or not self._is_small_task(current["text"]):
+                    break
+                group.append(candidate)
+                j += 1
+
+            if len(group) > 1:
+                combined_text = "\n".join([f"- {t['text']}" for t in group])
+                batched.append({
+                    "text": f"BATCHED TASKS:\n{combined_text}",
+                    "completed": False,
+                    "section": section,
+                    "batch": group
+                })
+                i = j
+            else:
+                batched.append(current)
+                i += 1
+
+        return batched
 
     async def _execute_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a single task and return the result."""
@@ -794,8 +818,10 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
             "details": f"[{start_time.strftime('%H:%M:%S')}] {task_text[:80]}..."
         })
 
-        # Estimate complexity
-        complexity = await self._estimate_task_complexity(task_text)
+        # Estimate complexity (skip for batched tasks)
+        complexity = "medium"
+        if "batch" not in task:
+            complexity = await self._estimate_task_complexity(task_text)
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -805,7 +831,7 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
         })
 
         # If task is large, split it into subtasks
-        if complexity == "large":
+        if complexity == "large" and "batch" not in task:
             await self._send_message("info", f"Large task detected, splitting: {task_text[:40]}...")
 
             subtasks = await self._split_large_task(task_text)
@@ -841,6 +867,11 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
             "action": f"Task finished ({duration_str})",
             "details": f"Status: {result['status']}"
         })
+
+        # If batched tasks, mark each subtask complete on success
+        if "batch" in task and result["status"] == "complete":
+            for subtask in task["batch"]:
+                await self._mark_task_complete(subtask["text"])
 
         return {"task": task, "result": result, "agent": agent_name}
 
@@ -887,35 +918,38 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                             "details": f"Completed. Skipped {len(skipped_tasks)} problematic tasks."
                         })
 
-                        # Run Security Review phase
-                        await self._set_project_status(
-                            ProjectStatus.SECURITY_REVIEW,
-                            "All tasks complete, starting security review"
-                        )
+                        # Run Security Review phase (if enabled)
+                        if self.quality_gates.get("run_security_review", True):
+                            await self._set_project_status(
+                                ProjectStatus.SECURITY_REVIEW,
+                                "All tasks complete, starting security review"
+                            )
 
-                        security_result = await self._run_final_security_review()
+                            security_result = await self._run_final_security_review()
 
-                        # Check for blocking security issues
-                        security_issues = []
-                        if security_result and security_result.get("status") == "complete":
-                            result_text = security_result.get("result", "")
-                            if "blocking" in result_text.lower():
-                                security_issues = self._parse_review_issues(result_text)
-                                security_issues = [i for i in security_issues if "BLOCKING" in i.get("title", "").upper()]
+                            # Check for blocking security issues
+                            security_issues = []
+                            if security_result and security_result.get("status") == "complete":
+                                result_text = security_result.get("result", "")
+                                if "blocking" in result_text.lower():
+                                    security_issues = self._parse_review_issues(result_text)
+                                    security_issues = [i for i in security_issues if "BLOCKING" in i.get("title", "").upper()]
 
-                        if security_issues:
-                            # Issues found, add to TODO and go back to WIP
-                            issues_added = await self._handle_review_issues(security_issues, "Security")
-                            if issues_added:
-                                continue  # Continue working on new issues
+                            if security_issues:
+                                # Issues found, add to TODO and go back to WIP
+                                issues_added = await self._handle_review_issues(security_issues, "Security")
+                                if issues_added:
+                                    continue  # Continue working on new issues
+                            else:
+                                self._save_quality_marker()
 
-                        # Security passed, run QA Review phase
-                        await self._set_project_status(
-                            ProjectStatus.QA,
-                            "Security review passed, starting QA"
-                        )
-
+                        # Security passed (or skipped), run QA Review phase
                         qa_result = await self._run_qa_review()
+                        if qa_result and qa_result.get("status") != "skipped":
+                            await self._set_project_status(
+                                ProjectStatus.QA,
+                                "Security review passed, starting QA"
+                            )
 
                         # Check for blocking/major QA issues
                         qa_issues = []
@@ -928,6 +962,7 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                                     f"QA Review completed successfully.\n\n{result_text[:1000]}",
                                     "QA Review Notes"
                                 )
+                                self._save_quality_marker()
                             else:
                                 qa_issues = self._parse_review_issues(result_text)
 
@@ -937,10 +972,10 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                             if issues_added:
                                 continue  # Continue working on new issues
 
-                        # QA passed - transition to UAT (User Acceptance Testing)
+                        # QA passed or skipped - transition to UAT (User Acceptance Testing)
                         await self._set_project_status(
                             ProjectStatus.UAT,
-                            "Security and QA reviews passed - ready for user acceptance testing"
+                            "Reviews complete - ready for user acceptance testing"
                         )
 
                         # Notify UI that UAT is ready
@@ -965,6 +1000,9 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                     "details": ", ".join([t["text"][:30] + "..." for t in tasks])
                 })
 
+                # Batch small tasks by section to reduce CLI invocations
+                tasks = self._batch_tasks_by_section(tasks)
+
                 # Execute tasks in parallel
                 task_coroutines = [self._execute_task(task) for task in tasks]
                 results = await asyncio.gather(*task_coroutines, return_exceptions=True)
@@ -985,7 +1023,11 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                     result = res["result"]
 
                     if result["status"] == "complete":
-                        await self._mark_task_complete(task["text"])
+                        if "batch" in task:
+                            # Batched tasks are marked individually inside _execute_task
+                            pass
+                        else:
+                            await self._mark_task_complete(task["text"])
                     elif result["status"] == "split":
                         # Task was split into subtasks, will be picked up on next iteration
                         self._log_activity({
@@ -1104,16 +1146,17 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
         if not os.path.exists(todo_path):
             return
 
-        async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
+        async with self.todo_lock:
+            async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
 
-        # Replace the unchecked task with checked
-        old_task = f"- [ ] {task_text}"
-        new_task = f"- [x] {task_text}"
-        content = content.replace(old_task, new_task)
+            # Replace the unchecked task with checked
+            old_task = f"- [ ] {task_text}"
+            new_task = f"- [x] {task_text}"
+            content = content.replace(old_task, new_task)
 
-        async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
-            await f.write(content)
+            async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
+                await f.write(content)
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -1274,8 +1317,173 @@ Report any blocking issues that must be fixed before proceeding."""
 
         return result
 
+    async def _run_tests(self) -> Dict[str, Any]:
+        """Run tests based on configured testing strategy."""
+        strategy = (self.testing_strategy or "critical_paths").lower()
+        if not self.quality_gates.get("run_tests", True):
+            return {"status": "skipped", "summary": "Testing skipped (quality gate disabled)."}
+
+        if strategy == "minimal":
+            self._log_activity({
+                "timestamp": datetime.now().isoformat(),
+                "agent": "orchestrator",
+                "action": "Tests skipped",
+                "details": "testing_strategy=minimal"
+            })
+            return {"status": "skipped", "summary": "Testing skipped (strategy: minimal)."}
+
+        if strategy in {"critical_paths", "full_tdd"}:
+            if not self._has_code_changes_since_last_review():
+                return {"status": "skipped", "summary": "Testing skipped (no code changes since last QA)."}
+            await self._ensure_tests_exist(allow_update=True)
+
+        tests_found = self._detect_pytests()
+        if not tests_found:
+            summary = f"No tests found (strategy: {strategy})."
+            if strategy == "full_tdd":
+                self._log_activity({
+                    "timestamp": datetime.now().isoformat(),
+                    "agent": "orchestrator",
+                    "action": "Tests failed",
+                    "details": "No tests found for full_tdd"
+                })
+                return {"status": "failed", "summary": summary}
+
+            self._log_activity({
+                "timestamp": datetime.now().isoformat(),
+                "agent": "orchestrator",
+                "action": "Tests skipped",
+                "details": summary
+            })
+            return {"status": "skipped", "summary": summary}
+
+        cmd = ["pytest", "-q"]
+        self._log_activity({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "orchestrator",
+            "action": "Running tests",
+            "details": "pytest -q"
+        })
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=self.project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            timeout = min(self.task_timeout, 300)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+
+            out = stdout.decode('utf-8', errors='replace').strip()
+            err = stderr.decode('utf-8', errors='replace').strip()
+            combined = out
+            if err:
+                combined = f"{out}\n{err}".strip()
+
+            if process.returncode == 0:
+                return {"status": "passed", "summary": combined or "pytest passed."}
+            return {"status": "failed", "summary": combined or "pytest failed."}
+        except asyncio.TimeoutError:
+            return {"status": "timeout", "summary": "pytest timed out."}
+        except FileNotFoundError:
+            return {"status": "error", "summary": "pytest not found. Install it to run tests."}
+        except Exception as e:
+            return {"status": "error", "summary": f"Test runner error: {str(e)[:200]}"}
+
+    def _detect_pytests(self) -> bool:
+        """Detect if pytest-style tests exist in the project."""
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build"}]
+            for name in files:
+                if name.startswith("test_") and name.endswith(".py"):
+                    return True
+        return False
+
+    def _quality_marker_path(self) -> str:
+        return os.path.join(self.project_path, ".quality_gate.json")
+
+    def _get_latest_code_mtime(self) -> float:
+        code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.sql', '.sh', '.yml', '.yaml', '.json'}
+        exclude_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', 'QA'}
+        latest = 0.0
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for file in files:
+                ext = os.path.splitext(file)[1].lower()
+                if ext in code_extensions:
+                    try:
+                        mtime = os.path.getmtime(os.path.join(root, file))
+                        if mtime > latest:
+                            latest = mtime
+                    except OSError:
+                        continue
+        return latest
+
+    def _has_code_changes_since_last_review(self) -> bool:
+        latest = self._get_latest_code_mtime()
+        if latest == 0.0:
+            return False
+        marker_path = self._quality_marker_path()
+        if not os.path.exists(marker_path):
+            return True
+        try:
+            with open(marker_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            last_mtime = float(data.get("last_code_mtime", 0.0))
+            return latest > last_mtime
+        except Exception:
+            return True
+
+    def _save_quality_marker(self):
+        marker_path = self._quality_marker_path()
+        data = {
+            "last_code_mtime": self._get_latest_code_mtime(),
+            "timestamp": datetime.now().isoformat()
+        }
+        try:
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    async def _ensure_tests_exist(self, allow_update: bool = False) -> None:
+        """Ask the Software Engineer to create or update minimal tests as needed."""
+        tests_exist = self._detect_pytests()
+
+        try:
+            await self._notify_agent_start("software_engineer")
+            if tests_exist and not allow_update:
+                return
+
+            prompt = """Create or update a minimal pytest test suite for this project.
+
+Requirements:
+- Place tests under a `tests/` directory
+- Ensure tests align with the current code after recent changes
+- At least one test should assert basic project sanity (e.g., config loads, app imports)
+- Keep tests fast and focused on critical paths
+- If tests already exist, update them minimally; regenerate only if necessary
+"""
+            await self.agents["software_engineer"].process_task(
+                task=prompt,
+                project_path=self.project_path,
+                context=self.memory.get_project_summary(),
+                orchestrator=self,
+                timeout=min(self.task_timeout, 300)
+            )
+        except Exception:
+            pass
+        finally:
+            await self._notify_agent_complete("software_engineer")
+
     async def _run_qa_review(self) -> Dict[str, Any]:
         """Run QA testing on the project."""
+        if not self.quality_gates.get("run_qa_review", True):
+            return {"status": "skipped", "result": "QA review skipped (quality gate disabled)."}
+        if not self._has_code_changes_since_last_review():
+            return {"status": "skipped", "result": "QA review skipped (no code changes since last QA)."}
+
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
             "agent": "orchestrator",
@@ -1284,6 +1492,8 @@ Report any blocking issues that must be fixed before proceeding."""
         })
 
         await self._send_message("info", "Running QA review...")
+
+        test_result = await self._run_tests()
 
         # Read spec for requirements verification
         spec_content = ""
@@ -1306,6 +1516,9 @@ You have Playwright available for browser-based testing.
 
 PROJECT SPECIFICATION:
 {spec_content[:3000]}
+
+TEST RESULTS:
+{test_result.get("summary", "No tests were run.")}
 
 TESTING INSTRUCTIONS:
 1. Review what was implemented (check src/ folder)

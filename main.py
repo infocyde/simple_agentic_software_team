@@ -129,7 +129,7 @@ async def list_projects():
 @app.post("/api/projects")
 async def create_project(req: CreateProjectRequest):
     """Create a new project."""
-    result = project_manager.create_project(req.name)
+    result = project_manager.create_project(req.name, quality_gates=config.get("quality_gates"))
     return result
 
 
@@ -440,6 +440,30 @@ async def get_project_workflow_status(name: str):
         "name": name,
         "status": status
     }
+
+
+@app.get("/api/projects/{name}/quality-gates")
+async def get_project_quality_gates(name: str):
+    """Get per-project quality gates."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return {"quality_gates": project_manager.get_quality_gates(name)}
+
+
+@app.put("/api/projects/{name}/quality-gates")
+async def set_project_quality_gates(name: str, new_gates: Dict[str, Any]):
+    """Set per-project quality gates."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = project_manager.set_quality_gates(name, new_gates)
+    if name in active_orchestrators:
+        active_orchestrators[name].quality_gates = result.get("quality_gates", {})
+
+    return result
 
 
 @app.post("/api/projects/{name}/status")

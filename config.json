@@ -4,6 +4,11 @@
     "review_policy": "tiered",
     "autonomy_level": "full"
   },
+  "quality_gates": {
+    "run_security_review": true,
+    "run_qa_review": true,
+    "run_tests": true
+  },
   "playwright": {
     "enabled": true,
     "auto_detect": true,
@@ -56,7 +61,10 @@
   "execution": {
     "max_concurrent_agents": 4,
     "task_timeout_seconds": 600,
-    "max_task_retries": 3
+    "max_task_retries": 3,
+    "allow_cross_section_parallel": true,
+    "enable_task_batching": true,
+    "task_batch_size": 2
   },
   "model_routing": {
     "enabled": true,

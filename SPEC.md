@@ -32,6 +32,11 @@ End-to-end software development system with a bias toward speed over perfection.
 - Code quality review (advisory)
 - Identifies vulnerabilities and issues
 
+### 6. QA Tester
+- Automated QA pass after implementation
+- Verifies requirements and critical flows
+- Can use Playwright MCP server (optional)
+
 ## Coordination Model
 **Hybrid approach:**
 - PM acts as central coordinator
@@ -62,16 +67,27 @@ End-to-end software development system with a bias toward speed over perfection.
 2. PM generates spec document (SPEC.md)
 3. PM creates todo list with checkboxes (TODO.md)
 4. Work begins with agents tackling tasks
+5. Security review runs after tasks complete
+6. QA review runs after security passes
+7. UAT starts with user approval in the UI
 
 ### New Feature Request
 1. PM asks ~10 questions to understand the feature
 2. PM updates spec and creates feature-specific todos
 3. Treated as mini-project within existing codebase
 
+### Workflow Statuses
+- **WIP** → **Security Review** → **QA** → **UAT** → **Done**
+
 ## Testing Strategy
 - **Default:** Test critical paths
 - **Configurable:** Can be set per project
 - Options: minimal, smoke tests, critical paths, full TDD
+
+## QA Automation (Optional)
+- QA step can use Playwright MCP server via Claude Code
+- Configured in `config.json` under `playwright`
+- Can be disabled by setting `playwright.enabled` to `false`
 
 ## Review Policy
 - **Tiered (default):**
@@ -113,14 +129,17 @@ End-to-end software development system with a bias toward speed over perfection.
 ## Completion Requirements
 When a project/feature is "done":
 1. All todo items checked off
-2. Project runs locally (verified)
-3. Ready to push to Git
-4. Summary report generated:
+2. Security review passed (or issues resolved)
+3. QA review passed (or issues resolved)
+4. UAT approved by the user
+5. Project runs locally (verified)
+6. Ready to push to Git
+7. Summary report generated:
    - What was built
    - Decisions made and why
    - Possible issues flagged
    - Lessons learned
-5. Deployment instructions provided
+8. Deployment instructions provided
 
 ## Configuration
 Global config in `config.json`:

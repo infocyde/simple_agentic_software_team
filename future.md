@@ -282,3 +282,8 @@ handleLaunchError(data) { }
 2. Should launched projects persist across app restarts?
 3. Max number of concurrent launched projects?
 4. Should there be a "Build" step for production builds vs dev servers?
+
+## Notes
+
+- The current workflow uses statuses: WIP → Security Review → QA → UAT → Done.
+- If a launch feature is added, consider whether launching is allowed before UAT approval.

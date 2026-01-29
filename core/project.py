@@ -55,7 +55,7 @@ class ProjectManager:
         self.projects_dir = os.path.join(base_path, "projects")
         os.makedirs(self.projects_dir, exist_ok=True)
 
-    def create_project(self, name: str, init_git: bool = True) -> Dict[str, Any]:
+    def create_project(self, name: str, init_git: bool = True, quality_gates: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
         """
         Create a new project directory with initial structure.
 
@@ -82,7 +82,7 @@ class ProjectManager:
         os.makedirs(os.path.join(project_path, "src"), exist_ok=True)
 
         # Create initial files
-        self._create_initial_files(project_path, name)
+        self._create_initial_files(project_path, name, quality_gates=quality_gates)
 
         # Initialize git if requested
         if init_git:
@@ -95,7 +95,7 @@ class ProjectManager:
             "name": safe_name
         }
 
-    def _create_initial_files(self, project_path: str, display_name: str):
+    def _create_initial_files(self, project_path: str, display_name: str, quality_gates: Optional[Dict[str, bool]] = None):
         """Create initial project files."""
         # Create placeholder SPEC.md
         spec_content = f"""# {display_name}
@@ -148,7 +148,12 @@ This file tracks decisions, actions, and lessons learned.
             ],
             "security_review_passed": False,
             "qa_passed": False,
-            "review_cycles": 0
+            "review_cycles": 0,
+            "quality_gates": quality_gates or {
+                "run_security_review": True,
+                "run_qa_review": True,
+                "run_tests": True
+            }
         }
         with open(os.path.join(project_path, "STATUS.json"), 'w') as f:
             json.dump(status_data, f, indent=2)
@@ -347,7 +352,12 @@ build/
                 "history": [],
                 "security_review_passed": False,
                 "qa_passed": False,
-                "review_cycles": 0
+                "review_cycles": 0,
+                "quality_gates": {
+                    "run_security_review": True,
+                    "run_qa_review": True,
+                    "run_tests": True
+                }
             }
 
     def set_workflow_status(
@@ -432,7 +442,12 @@ build/
             ],
             "security_review_passed": False,
             "qa_passed": False,
-            "review_cycles": 0
+            "review_cycles": 0,
+            "quality_gates": {
+                "run_security_review": True,
+                "run_qa_review": True,
+                "run_tests": True
+            }
         }
 
         # Check if project appears to be complete
@@ -443,6 +458,32 @@ build/
 
         with open(os.path.join(project_path, "STATUS.json"), 'w') as f:
             json.dump(status_data, f, indent=2)
+
+    def get_quality_gates(self, name: str) -> Dict[str, bool]:
+        """Get per-project quality gates."""
+        status = self.get_workflow_status(name)
+        return status.get("quality_gates", {
+            "run_security_review": True,
+            "run_qa_review": True,
+            "run_tests": True
+        })
+
+    def set_quality_gates(self, name: str, gates: Dict[str, bool]) -> Dict[str, Any]:
+        """Update per-project quality gates in STATUS.json."""
+        project_path = os.path.join(self.projects_dir, name)
+        status_file = os.path.join(project_path, "STATUS.json")
+
+        current = self.get_workflow_status(name)
+        current["quality_gates"] = {
+            "run_security_review": bool(gates.get("run_security_review", True)),
+            "run_qa_review": bool(gates.get("run_qa_review", True)),
+            "run_tests": bool(gates.get("run_tests", True))
+        }
+
+        with open(status_file, 'w') as f:
+            json.dump(current, f, indent=2)
+
+        return {"status": "success", "quality_gates": current["quality_gates"]}
 
     def add_review_issues_to_todo(
         self,

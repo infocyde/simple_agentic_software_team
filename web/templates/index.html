@@ -4,9 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agentic Software Team</title>
+    <link rel="icon" href="/static/favicon.png" type="image/png">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <div id="splashOverlay" class="splash-overlay" style="display: none;">
+        <div class="splash-backdrop"></div>
+        <div class="splash-content">
+            <img src="/static/night-ronin.png" alt="NightRonin" class="splash-logo">
+        </div>
+    </div>
     <div class="container">
         <header>
             <h1>Agentic Software Team</h1>
@@ -102,6 +109,23 @@
                             <button id="startUatBtn" class="btn btn-uat" style="display: none;">Start UAT</button>
                             <button id="completeUatBtn" class="btn btn-success" style="display: none;">Complete UAT</button>
                         </div>
+                    </div>
+
+                    <div class="quality-gates" id="qualityGates">
+                        <label class="gate-toggle">
+                            <input type="checkbox" id="gateSecurity" checked>
+                            <span>Security Review</span>
+                        </label>
+                        <label class="gate-toggle">
+                            <input type="checkbox" id="gateQa" checked>
+                            <span>QA Review</span>
+                        </label>
+                        <label class="gate-toggle">
+                            <input type="checkbox" id="gateTests" checked>
+                            <span>Run Tests</span>
+                        </label>
+                        <button id="saveGatesBtn" class="btn btn-secondary btn-small">Save Gates</button>
+                        <span id="gatesStatus" class="gates-status"></span>
                     </div>
 
                     <div class="tabs">
