@@ -140,8 +140,28 @@ header h1 {
     color: white;
 }
 
-.badge-complete {
+.badge-complete, .badge-done {
     background: #1b5e20;
+    color: white;
+}
+
+.badge-wip {
+    background: #0f4c75;
+    color: white;
+}
+
+.badge-security {
+    background: #f44336;
+    color: white;
+}
+
+.badge-qa {
+    background: #9c27b0;
+    color: white;
+}
+
+.badge-uat {
+    background: #ff9800;
     color: white;
 }
 
@@ -158,13 +178,147 @@ header h1 {
 
 .project-header {
     display: flex;
+    flex-direction: column;
+    margin-bottom: 20px;
+}
+
+.project-title-row {
+    display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 20px;
+    margin-bottom: 15px;
 }
 
 .project-header h2 {
     font-size: 1.4rem;
+}
+
+.project-status-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.project-status-badge .status-label {
+    color: #888;
+    font-size: 0.85rem;
+}
+
+.project-status-badge .status-value {
+    font-size: 0.85rem;
+    padding: 4px 12px;
+}
+
+/* Status Timeline */
+.project-status-timeline {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #1a1a2e;
+    padding: 15px 20px;
+    border-radius: 8px;
+    margin-bottom: 15px;
+    position: relative;
+}
+
+.project-status-timeline::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 40px;
+    right: 40px;
+    height: 2px;
+    background: #333;
+    transform: translateY(-50%);
+    z-index: 0;
+}
+
+.status-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    z-index: 1;
+}
+
+.status-step .step-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #333;
+    border: 2px solid #444;
+    transition: all 0.3s ease;
+}
+
+.status-step .step-label {
+    font-size: 0.75rem;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.status-step.active .step-dot {
+    background: #0f4c75;
+    border-color: #1a6ea0;
+    box-shadow: 0 0 8px rgba(15, 76, 117, 0.6);
+}
+
+.status-step.active .step-label {
+    color: #fff;
+    font-weight: 600;
+}
+
+.status-step.completed .step-dot {
+    background: #1b5e20;
+    border-color: #2e7d32;
+}
+
+.status-step.completed .step-label {
+    color: #4caf50;
+}
+
+.status-step[data-status="security_review"].active .step-dot {
+    background: #f44336;
+    border-color: #ff5252;
+    box-shadow: 0 0 8px rgba(244, 67, 54, 0.6);
+}
+
+.status-step[data-status="qa"].active .step-dot {
+    background: #9c27b0;
+    border-color: #ba68c8;
+    box-shadow: 0 0 8px rgba(156, 39, 176, 0.6);
+}
+
+.status-step[data-status="uat"].active .step-dot {
+    background: #ff9800;
+    border-color: #ffb74d;
+    box-shadow: 0 0 8px rgba(255, 152, 0, 0.6);
+}
+
+.status-step[data-status="done"].active .step-dot,
+.status-step[data-status="done"].completed .step-dot {
+    background: #1b5e20;
+    border-color: #4caf50;
+    box-shadow: 0 0 8px rgba(76, 175, 80, 0.6);
+}
+
+/* UAT Button */
+.btn-uat {
+    background: #ff9800;
+    color: white;
+}
+
+.btn-uat:hover {
+    background: #f57c00;
+}
+
+.btn-success {
+    background: #1b5e20;
+    color: white;
+}
+
+.btn-success:hover {
+    background: #2e7d32;
 }
 
 .project-actions {
@@ -240,6 +394,10 @@ header h1 {
 
 .activity-item.security_reviewer {
     border-left-color: #f44336;
+}
+
+.activity-item.qa_tester {
+    border-left-color: #9c27b0;
 }
 
 .activity-item.orchestrator {

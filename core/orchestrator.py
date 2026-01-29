@@ -13,9 +13,12 @@ from agents import (
     SoftwareEngineerAgent,
     UIUXEngineerAgent,
     DatabaseAdminAgent,
-    SecurityReviewerAgent
+    SecurityReviewerAgent,
+    QATesterAgent
 )
 from .memory import MemoryManager
+from .project import ProjectManager, ProjectStatus
+from .playwright_utils import PlaywrightManager
 
 
 class TaskFailureAction(Enum):
@@ -55,6 +58,15 @@ class Orchestrator:
         self.message_callback = message_callback  # For sending work status updates
         self.activity_log: List[Dict[str, Any]] = []
         self.memory = MemoryManager(project_path)
+
+        # Project status management
+        base_path = os.path.dirname(project_path)
+        self.project_manager_core = ProjectManager(os.path.dirname(base_path))
+        self.project_name = os.path.basename(project_path)
+
+        # Playwright for QA testing
+        self.playwright_manager = PlaywrightManager(config)
+        self.playwright_available = self.playwright_manager.is_available()
 
         # Pending human input requests
         self.pending_human_input: Optional[Dict[str, Any]] = None
@@ -104,6 +116,11 @@ class Orchestrator:
             "security_reviewer": SecurityReviewerAgent(
                 activity_callback=self._log_activity,
                 model_preference=agent_configs.get('security_reviewer', {}).get('model', 'opus')
+            ),
+            "qa_tester": QATesterAgent(
+                activity_callback=self._log_activity,
+                model_preference=agent_configs.get('qa_tester', {}).get('model', 'auto'),
+                playwright_available=self.playwright_available
             )
         }
 
@@ -837,6 +854,9 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
         self.total_failures = 0
         skipped_tasks = set()
 
+        # Set status to WIP
+        await self._set_project_status(ProjectStatus.WIP, "Work started")
+
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
             "agent": "orchestrator",
@@ -867,10 +887,75 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                             "details": f"Completed. Skipped {len(skipped_tasks)} problematic tasks."
                         })
 
-                        # Run security review before marking complete
-                        await self._run_final_security_review()
+                        # Run Security Review phase
+                        await self._set_project_status(
+                            ProjectStatus.SECURITY_REVIEW,
+                            "All tasks complete, starting security review"
+                        )
 
-                        await self._send_message("work_complete", "All tasks in TODO.md are complete!")
+                        security_result = await self._run_final_security_review()
+
+                        # Check for blocking security issues
+                        security_issues = []
+                        if security_result and security_result.get("status") == "complete":
+                            result_text = security_result.get("result", "")
+                            if "blocking" in result_text.lower():
+                                security_issues = self._parse_review_issues(result_text)
+                                security_issues = [i for i in security_issues if "BLOCKING" in i.get("title", "").upper()]
+
+                        if security_issues:
+                            # Issues found, add to TODO and go back to WIP
+                            issues_added = await self._handle_review_issues(security_issues, "Security")
+                            if issues_added:
+                                continue  # Continue working on new issues
+
+                        # Security passed, run QA Review phase
+                        await self._set_project_status(
+                            ProjectStatus.QA,
+                            "Security review passed, starting QA"
+                        )
+
+                        qa_result = await self._run_qa_review()
+
+                        # Check for blocking/major QA issues
+                        qa_issues = []
+                        if qa_result and qa_result.get("status") == "complete":
+                            result_text = qa_result.get("result", "")
+
+                            # Add non-issue notes to QA notes file
+                            if "qa passed" in result_text.lower():
+                                await self._add_qa_notes(
+                                    f"QA Review completed successfully.\n\n{result_text[:1000]}",
+                                    "QA Review Notes"
+                                )
+                            else:
+                                qa_issues = self._parse_review_issues(result_text)
+
+                        if qa_issues:
+                            # Issues found, add to TODO and go back to WIP
+                            issues_added = await self._handle_review_issues(qa_issues, "QA")
+                            if issues_added:
+                                continue  # Continue working on new issues
+
+                        # QA passed - transition to UAT (User Acceptance Testing)
+                        await self._set_project_status(
+                            ProjectStatus.UAT,
+                            "Security and QA reviews passed - ready for user acceptance testing"
+                        )
+
+                        # Notify UI that UAT is ready
+                        await self._send_message(
+                            "uat_ready",
+                            "All automated checks passed! Ready for User Acceptance Testing. Click 'Start UAT' to begin your review."
+                        )
+
+                        # Work pauses here - UAT is a user-driven conversation
+                        self._log_activity({
+                            "timestamp": datetime.now().isoformat(),
+                            "agent": "orchestrator",
+                            "action": "Awaiting UAT",
+                            "details": "Project ready for user acceptance testing"
+                        })
                         break
 
                 self._log_activity({
@@ -994,6 +1079,10 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
         """Determine which agent should handle a task based on keywords."""
         task_lower = task_text.lower()
 
+        # QA/Testing related
+        if any(kw in task_lower for kw in ['test', 'qa', 'verify', 'bug', 'fix bug', 'regression', 'validation']):
+            return "qa_tester"
+
         # UI/UX related
         if any(kw in task_lower for kw in ['ui', 'ux', 'design', 'css', 'style', 'layout', 'interface', 'frontend', 'html', 'template']):
             return "ui_ux_engineer"
@@ -1037,7 +1126,7 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
         """Continue working on the current project (alias for start_work)."""
         return await self.start_work()
 
-    async def _run_final_security_review(self):
+    async def _run_final_security_review(self) -> Dict[str, Any]:
         """Run a security review on all project files before completion."""
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -1050,7 +1139,7 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
 
         # Collect all code files in the project
         code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.sql', '.sh', '.yml', '.yaml', '.json'}
-        exclude_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build'}
+        exclude_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', 'QA'}
 
         files_to_review = []
         for root, dirs, files in os.walk(self.project_path):
@@ -1071,7 +1160,7 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                 "action": "Security review skipped",
                 "details": "No code files found to review"
             })
-            return
+            return {"status": "complete", "result": "No code files to review"}
 
         # Limit to reasonable number of files
         if len(files_to_review) > 20:
@@ -1096,6 +1185,12 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                     "details": result.get("result", "Review completed")[:500]
                 })
                 await self._send_message("info", "Security review completed")
+
+                # Add notes to QA notes file
+                await self._add_qa_notes(
+                    f"Security Review completed.\n\n{result.get('result', '')[:1000]}",
+                    "Security Review Notes"
+                )
             else:
                 self._log_activity({
                     "timestamp": datetime.now().isoformat(),
@@ -1103,6 +1198,8 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                     "action": "Security review issue",
                     "details": result.get("result", "Unknown issue")[:200]
                 })
+
+            return result
 
         except Exception as e:
             error_msg = str(e).encode('ascii', errors='replace').decode('ascii')
@@ -1113,6 +1210,7 @@ Ask ONE question at a time. After gathering enough information, update SPEC.md a
                 "details": error_msg[:200]
             })
             await self._send_message("info", f"Security review encountered an error: {error_msg[:100]}")
+            return {"status": "error", "result": error_msg}
 
     async def request_security_review(self, files: List[str]) -> Dict[str, Any]:
         """Request a security review for specified files."""
@@ -1149,3 +1247,187 @@ Report any blocking issues that must be fixed before proceeding."""
             "pending_human_input": self.pending_human_input is not None,
             "config": self.config
         }
+
+    async def _set_project_status(self, status: ProjectStatus, reason: str = ""):
+        """Set the project workflow status and notify UI."""
+        result = self.project_manager_core.set_workflow_status(
+            name=self.project_name,
+            new_status=status,
+            agent="orchestrator",
+            reason=reason
+        )
+
+        self._log_activity({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "orchestrator",
+            "action": f"Status changed to {status.value.upper()}",
+            "details": reason
+        })
+
+        await self._send_message(
+            "status_change",
+            f"Project status: {status.value}",
+            new_status=status.value,
+            previous_status=result.get("previous_status"),
+            reason=reason
+        )
+
+        return result
+
+    async def _run_qa_review(self) -> Dict[str, Any]:
+        """Run QA testing on the project."""
+        self._log_activity({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "orchestrator",
+            "action": "Starting QA review",
+            "details": f"Playwright available: {self.playwright_available}"
+        })
+
+        await self._send_message("info", "Running QA review...")
+
+        # Read spec for requirements verification
+        spec_content = ""
+        spec_path = os.path.join(self.project_path, "SPEC.md")
+        if os.path.exists(spec_path):
+            with open(spec_path, 'r', encoding='utf-8') as f:
+                spec_content = f.read()
+
+        # Build QA task
+        playwright_note = ""
+        if self.playwright_available:
+            playwright_note = """
+You have Playwright available for browser-based testing.
+- Use browser_navigate to open the application
+- Use browser_take_screenshot to capture evidence (save to the QA folder)
+- Verify the UI matches the spec requirements
+"""
+
+        qa_task = f"""Perform QA testing on this project to verify it meets the specification.
+
+PROJECT SPECIFICATION:
+{spec_content[:3000]}
+
+TESTING INSTRUCTIONS:
+1. Review what was implemented (check src/ folder)
+2. Verify each requirement from the spec is met
+3. Test critical user flows
+4. Document any bugs or issues found
+{playwright_note}
+
+For each issue found, report:
+- SEVERITY: BLOCKING / MAJOR / MINOR
+- TITLE: Brief description
+- DESCRIPTION: Detailed explanation
+- EXPECTED: What should happen
+- ACTUAL: What actually happens
+
+If all tests pass, report "QA PASSED" with a summary of what was tested.
+If issues are found, report them in the format above so they can be added to TODO."""
+
+        try:
+            await self._notify_agent_start("qa_tester")
+
+            qa_agent = self.agents["qa_tester"]
+            result = await qa_agent.process_task(
+                task=qa_task,
+                project_path=self.project_path,
+                context=self.memory.get_project_summary(),
+                orchestrator=self,
+                timeout=self.task_timeout * 2  # Give QA more time
+            )
+
+            await self._notify_agent_complete("qa_tester")
+
+            return result
+
+        except Exception as e:
+            await self._notify_agent_complete("qa_tester")
+            error_msg = str(e).encode('ascii', errors='replace').decode('ascii')
+            return {"status": "error", "result": error_msg}
+
+    def _parse_review_issues(self, review_result: str) -> List[Dict[str, str]]:
+        """Parse issues from security or QA review results."""
+        issues = []
+        lines = review_result.split('\n')
+
+        current_issue = {}
+        for line in lines:
+            line_lower = line.lower().strip()
+
+            # Look for issue markers
+            if 'blocking:' in line_lower or 'major:' in line_lower:
+                if current_issue:
+                    issues.append(current_issue)
+                severity = "BLOCKING" if "blocking" in line_lower else "MAJOR"
+                title = line.split(':', 1)[-1].strip() if ':' in line else line.strip()
+                current_issue = {"title": f"[{severity}] {title}", "description": ""}
+
+            elif line_lower.startswith('- title:') or line_lower.startswith('title:'):
+                if current_issue:
+                    issues.append(current_issue)
+                title = line.split(':', 1)[-1].strip()
+                current_issue = {"title": title, "description": ""}
+
+            elif line_lower.startswith('- description:') or line_lower.startswith('description:'):
+                if current_issue:
+                    current_issue["description"] = line.split(':', 1)[-1].strip()
+
+            elif line_lower.startswith('- severity:') or line_lower.startswith('severity:'):
+                if current_issue:
+                    severity = line.split(':', 1)[-1].strip().upper()
+                    if severity in ("BLOCKING", "MAJOR"):
+                        current_issue["title"] = f"[{severity}] {current_issue.get('title', '')}"
+
+        if current_issue and current_issue.get("title"):
+            issues.append(current_issue)
+
+        return issues
+
+    async def _handle_review_issues(
+        self,
+        issues: List[Dict[str, str]],
+        review_type: str
+    ) -> bool:
+        """
+        Handle issues found during review.
+        Returns True if issues were found and need to be addressed.
+        """
+        if not issues:
+            return False
+
+        # Add issues to TODO
+        self.project_manager_core.add_review_issues_to_todo(
+            name=self.project_name,
+            issues=issues,
+            review_type=review_type
+        )
+
+        # Set status back to WIP
+        await self._set_project_status(
+            ProjectStatus.WIP,
+            f"{len(issues)} issues found during {review_type} review"
+        )
+
+        # Notify UI
+        await self._send_message(
+            "info",
+            f"{review_type} found {len(issues)} issues. Added to TODO. Status reset to WIP."
+        )
+
+        self._log_activity({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "orchestrator",
+            "action": f"{review_type} issues added to TODO",
+            "details": f"{len(issues)} issues need to be addressed"
+        })
+
+        return True
+
+    async def _add_qa_notes(self, notes: str, section: str = "QA Review Notes"):
+        """Add notes to the QA notes.md file."""
+        self.project_manager_core.append_qa_notes(
+            name=self.project_name,
+            notes=notes,
+            section=section,
+            agent="qa_tester"
+        )

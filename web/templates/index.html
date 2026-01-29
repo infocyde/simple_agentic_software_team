@@ -22,11 +22,19 @@
                 </div>
                 <ul id="projectList" class="project-list">
                     {% for project in projects %}
-                    <li class="project-item" data-name="{{ project.name }}">
+                    <li class="project-item" data-name="{{ project.name }}" data-status="{{ project.workflow_status | default('initialized') }}">
                         <span class="project-name">{{ project.name }}</span>
                         <span class="project-status">
-                            {% if project.has_summary %}
-                            <span class="badge badge-complete">Complete</span>
+                            {% if project.workflow_status == 'done' %}
+                            <span class="badge badge-done">Done</span>
+                            {% elif project.workflow_status == 'uat' %}
+                            <span class="badge badge-uat">UAT</span>
+                            {% elif project.workflow_status == 'qa' %}
+                            <span class="badge badge-qa">QA</span>
+                            {% elif project.workflow_status == 'security_review' %}
+                            <span class="badge badge-security">Security</span>
+                            {% elif project.workflow_status == 'wip' %}
+                            <span class="badge badge-wip">WIP {{ project.todo_completed }}/{{ project.todo_total }}</span>
                             {% elif project.todo_total > 0 %}
                             <span class="badge badge-progress">{{ project.todo_completed }}/{{ project.todo_total }}</span>
                             {% else %}
@@ -53,12 +61,46 @@
 
                 <div id="projectView" class="project-view" style="display: none;">
                     <div class="project-header">
-                        <h2 id="projectTitle">Project Name</h2>
+                        <div class="project-title-row">
+                            <h2 id="projectTitle">Project Name</h2>
+                            <div id="projectStatusBadge" class="project-status-badge">
+                                <span class="status-label">Status:</span>
+                                <span id="projectStatusValue" class="status-value badge badge-new">Initialized</span>
+                            </div>
+                        </div>
+                        <div class="project-status-timeline" id="projectStatusTimeline">
+                            <div class="status-step" data-status="initialized">
+                                <span class="step-dot"></span>
+                                <span class="step-label">Init</span>
+                            </div>
+                            <div class="status-step" data-status="wip">
+                                <span class="step-dot"></span>
+                                <span class="step-label">WIP</span>
+                            </div>
+                            <div class="status-step" data-status="security_review">
+                                <span class="step-dot"></span>
+                                <span class="step-label">Security</span>
+                            </div>
+                            <div class="status-step" data-status="qa">
+                                <span class="step-dot"></span>
+                                <span class="step-label">QA</span>
+                            </div>
+                            <div class="status-step" data-status="uat">
+                                <span class="step-dot"></span>
+                                <span class="step-label">UAT</span>
+                            </div>
+                            <div class="status-step" data-status="done">
+                                <span class="step-dot"></span>
+                                <span class="step-label">Done</span>
+                            </div>
+                        </div>
                         <div class="project-actions">
                             <button id="kickoffBtn" class="btn btn-primary">Start Kickoff</button>
                             <button id="featureBtn" class="btn btn-secondary">Add Feature</button>
                             <button id="startWorkBtn" class="btn btn-secondary">Start Work</button>
                             <button id="pauseBtn" class="btn btn-secondary" style="display: none;">Pause</button>
+                            <button id="startUatBtn" class="btn btn-uat" style="display: none;">Start UAT</button>
+                            <button id="completeUatBtn" class="btn btn-success" style="display: none;">Complete UAT</button>
                         </div>
                     </div>
 
@@ -129,6 +171,11 @@
                     <div class="agent-item" data-agent="security_reviewer">
                         <span class="agent-icon">🔒</span>
                         <span class="agent-name">Security Reviewer</span>
+                        <span class="agent-status idle">Idle</span>
+                    </div>
+                    <div class="agent-item" data-agent="qa_tester">
+                        <span class="agent-icon">🧪</span>
+                        <span class="agent-name">QA Tester</span>
                         <span class="agent-status idle">Idle</span>
                     </div>
                 </div>

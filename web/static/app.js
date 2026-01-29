@@ -9,6 +9,7 @@ class AgenticTeamApp {
         this.waitingForInput = false;
         this.workInProgress = false;
         this.activeAgents = new Set();
+        this.uatActive = false;
 
         this.init();
     }
@@ -127,6 +128,18 @@ class AgenticTeamApp {
                 this.handleTaskEscalation(data);
                 break;
 
+            case 'status_change':
+                this.handleStatusChange(data);
+                break;
+
+            case 'uat_ready':
+                this.handleUatReady(data);
+                break;
+
+            case 'uat_complete':
+                this.handleUatComplete(data);
+                break;
+
             default:
                 // Legacy activity format
                 if (data.agent && data.action) {
@@ -174,6 +187,8 @@ class AgenticTeamApp {
         document.getElementById('startWorkBtn').addEventListener('click', () => this.startWork());
         document.getElementById('pauseBtn').addEventListener('click', () => this.pauseWork());
         document.getElementById('writeSpecBtn').addEventListener('click', () => this.writeSpec());
+        document.getElementById('startUatBtn').addEventListener('click', () => this.startUat());
+        document.getElementById('completeUatBtn').addEventListener('click', () => this.completeUat());
         document.getElementById('cancelMessage').addEventListener('click', () => this.hideModals());
         document.getElementById('messageForm').addEventListener('submit', (e) => this.startConversation(e));
 
@@ -244,8 +259,219 @@ class AgenticTeamApp {
             const activityData = await activityRes.json();
             this.renderActivityFeed(activityData.activity);
 
+            // Load project status
+            const statusRes = await fetch(`/api/projects/${this.currentProject}/status`);
+            const statusData = await statusRes.json();
+            if (statusData.status) {
+                this.updateStatusDisplay(statusData.status.current_status);
+            }
+
         } catch (error) {
             console.error('Error loading project data:', error);
+        }
+    }
+
+    handleStatusChange(data) {
+        // Update status display
+        if (data.new_status) {
+            this.updateStatusDisplay(data.new_status);
+        }
+
+        // Add to activity feed
+        this.addActivityItem({
+            agent: 'orchestrator',
+            action: `Status changed to ${data.new_status?.toUpperCase() || 'unknown'}`,
+            details: data.reason || '',
+            timestamp: new Date().toISOString()
+        });
+
+        // Update project list badge
+        if (this.currentProject) {
+            const projectItem = document.querySelector(`.project-item[data-name="${this.currentProject}"]`);
+            if (projectItem) {
+                projectItem.dataset.status = data.new_status;
+                this.updateProjectListBadge(projectItem, data.new_status);
+            }
+        }
+    }
+
+    updateStatusDisplay(status) {
+        // Update status badge
+        const statusValue = document.getElementById('projectStatusValue');
+        if (statusValue) {
+            const statusLabels = {
+                'initialized': 'Initialized',
+                'wip': 'Work In Progress',
+                'security_review': 'Security Review',
+                'qa': 'QA Testing',
+                'uat': 'User Acceptance Testing',
+                'done': 'Done'
+            };
+            const badgeClasses = {
+                'initialized': 'badge-new',
+                'wip': 'badge-wip',
+                'security_review': 'badge-security',
+                'qa': 'badge-qa',
+                'uat': 'badge-uat',
+                'done': 'badge-done'
+            };
+
+            statusValue.textContent = statusLabels[status] || status;
+            statusValue.className = `status-value badge ${badgeClasses[status] || 'badge-new'}`;
+        }
+
+        // Update timeline
+        this.updateStatusTimeline(status);
+
+        // Show/hide UAT buttons based on status
+        this.updateUatButtons(status);
+    }
+
+    updateStatusTimeline(currentStatus) {
+        const statusOrder = ['initialized', 'wip', 'security_review', 'qa', 'uat', 'done'];
+        const currentIndex = statusOrder.indexOf(currentStatus);
+
+        document.querySelectorAll('.status-step').forEach(step => {
+            const stepStatus = step.dataset.status;
+            const stepIndex = statusOrder.indexOf(stepStatus);
+
+            step.classList.remove('active', 'completed');
+
+            if (stepIndex < currentIndex) {
+                step.classList.add('completed');
+            } else if (stepIndex === currentIndex) {
+                step.classList.add('active');
+            }
+        });
+    }
+
+    updateProjectListBadge(projectItem, status) {
+        const statusSpan = projectItem.querySelector('.project-status');
+        if (!statusSpan) return;
+
+        const badges = {
+            'initialized': '<span class="badge badge-new">New</span>',
+            'wip': '<span class="badge badge-wip">WIP</span>',
+            'security_review': '<span class="badge badge-security">Security</span>',
+            'qa': '<span class="badge badge-qa">QA</span>',
+            'uat': '<span class="badge badge-uat">UAT</span>',
+            'done': '<span class="badge badge-done">Done</span>'
+        };
+
+        statusSpan.innerHTML = badges[status] || badges['initialized'];
+    }
+
+    updateUatButtons(status) {
+        const startUatBtn = document.getElementById('startUatBtn');
+        const completeUatBtn = document.getElementById('completeUatBtn');
+        const startWorkBtn = document.getElementById('startWorkBtn');
+
+        if (status === 'uat') {
+            // Show UAT button when in UAT status
+            startUatBtn.style.display = this.uatActive ? 'none' : 'inline-block';
+            completeUatBtn.style.display = this.uatActive ? 'inline-block' : 'none';
+            startWorkBtn.style.display = 'none';
+        } else {
+            startUatBtn.style.display = 'none';
+            completeUatBtn.style.display = 'none';
+        }
+    }
+
+    handleUatReady(data) {
+        // Show notification
+        this.addActivityItem({
+            agent: 'system',
+            action: 'Ready for User Acceptance Testing',
+            details: data.message || 'Click "Start UAT" to begin your review',
+            timestamp: new Date().toISOString()
+        });
+
+        // Update status display
+        this.updateStatusDisplay('uat');
+
+        // Show browser notification
+        this.showBrowserNotification('UAT Ready', 'Project is ready for your acceptance testing');
+    }
+
+    handleUatComplete(data) {
+        this.uatActive = false;
+        this.conversationActive = false;
+        this.setWaitingForInput(false);
+
+        // Update buttons
+        document.getElementById('completeUatBtn').style.display = 'none';
+
+        if (data.approved) {
+            this.updateStatusDisplay('done');
+            this.showCompletionToast('Project approved and marked as Done!');
+        } else {
+            this.updateStatusDisplay('wip');
+            this.addActivityItem({
+                agent: 'system',
+                action: 'Changes requested - returning to WIP',
+                details: 'New tasks added to TODO',
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        this.loadProjectData();
+    }
+
+    async startUat() {
+        if (!this.currentProject) return;
+
+        this.uatActive = true;
+        this.conversationActive = true;
+
+        // Switch to chat tab
+        this.clearChat();
+        this.switchTab('chat');
+
+        // Update buttons
+        document.getElementById('startUatBtn').style.display = 'none';
+        document.getElementById('completeUatBtn').style.display = 'inline-block';
+
+        // Show thinking indicator
+        this.showThinkingIndicator('project_manager');
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/uat`, {
+                method: 'POST'
+            });
+
+            const data = await res.json();
+            if (data.status === 'error') {
+                this.addChatMessage('system', `Error: ${data.message}`, 'system');
+                this.uatActive = false;
+            }
+        } catch (error) {
+            console.error('Error starting UAT:', error);
+            this.addChatMessage('system', 'Error starting UAT conversation', 'system');
+            this.uatActive = false;
+        }
+    }
+
+    async completeUat() {
+        if (!this.currentProject || !this.uatActive) return;
+
+        document.getElementById('completeUatBtn').disabled = true;
+        document.getElementById('completeUatBtn').textContent = 'Completing...';
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/complete-uat`, {
+                method: 'POST'
+            });
+
+            const data = await res.json();
+            if (data.status === 'error') {
+                this.addChatMessage('system', `Error: ${data.message}`, 'system');
+            }
+        } catch (error) {
+            console.error('Error completing UAT:', error);
+            this.addChatMessage('system', 'Error completing UAT', 'system');
+        } finally {
+            document.getElementById('completeUatBtn').disabled = false;
+            document.getElementById('completeUatBtn').textContent = 'Complete UAT';
         }
     }
 
@@ -311,6 +537,7 @@ class AgenticTeamApp {
             'ui_ux_engineer': 'UI/UX Engineer',
             'database_admin': 'Database Admin',
             'security_reviewer': 'Security Reviewer',
+            'qa_tester': 'QA Tester',
             'orchestrator': 'Orchestrator',
             'system': 'System'
         };

@@ -4,6 +4,18 @@
     "review_policy": "tiered",
     "autonomy_level": "full"
   },
+  "playwright": {
+    "enabled": true,
+    "auto_detect": true,
+    "screenshot_dir": "QA",
+    "default_timeout": 30000,
+    "browser": "chromium",
+    "headless": false,
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    }
+  },
   "guardrails": {
     "require_approval_for": [],
     "blocked_operations": [],
@@ -29,10 +41,15 @@
     "security_reviewer": {
       "enabled": true,
       "model": "opus"
+    },
+    "qa_tester": {
+      "enabled": true,
+      "model": "auto"
     }
   },
   "project_kickoff_questions": 18,
   "feature_kickoff_questions": 10,
+  "uat_questions": 10,
   "cli": {
     "dangerously_skip_permissions": true
   },

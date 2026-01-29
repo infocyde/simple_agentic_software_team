@@ -15,8 +15,9 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from core.orchestrator import Orchestrator
-from core.project import ProjectManager
+from core.project import ProjectManager, ProjectStatus
 from core.conversation import ConversationManager
+from core.playwright_utils import PlaywrightManager
 
 # Load environment variables
 load_dotenv()
@@ -68,6 +69,11 @@ class MessageRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+
+
+class StatusUpdateRequest(BaseModel):
+    status: str
+    reason: Optional[str] = "Manual status update"
 
 
 # WebSocket connection manager
@@ -277,6 +283,83 @@ async def write_spec(name: str):
     return {"status": "triggered", "message": "Creating spec and todo documents..."}
 
 
+@app.post("/api/projects/{name}/uat")
+async def start_uat(name: str):
+    """Start UAT (User Acceptance Testing) conversation."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Check that project is in UAT status
+    workflow_status = project_manager.get_workflow_status(name)
+    current_status = workflow_status.get("current_status", "")
+    if current_status != "uat":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project must be in UAT status to start UAT. Current status: {current_status}"
+        )
+
+    # Create message callback
+    async def message_callback(message: Dict[str, Any]):
+        message["project"] = name
+        await broadcast_message(message)
+
+    # Create status callback for UAT completion
+    async def status_callback(new_status: str, reason: str):
+        status_enum = ProjectStatus.from_string(new_status)
+        project_manager.set_workflow_status(
+            name=name,
+            new_status=status_enum,
+            agent="conversation_manager",
+            reason=reason
+        )
+        # Broadcast status change
+        await broadcast_message({
+            "type": "status_change",
+            "project": name,
+            "new_status": new_status,
+            "reason": reason
+        })
+
+    # Create conversation manager
+    conversation = ConversationManager(
+        project_path=project_path,
+        message_callback=message_callback,
+        activity_callback=create_activity_callback(name),
+        status_callback=status_callback
+    )
+
+    active_conversations[name] = conversation
+
+    # Get number of questions from config
+    num_questions = config.get("uat_questions", 10)
+
+    # Start UAT conversation in background
+    asyncio.create_task(conversation.start_uat_conversation(num_questions))
+
+    return {"status": "started", "message": "UAT conversation started"}
+
+
+@app.post("/api/projects/{name}/complete-uat")
+async def complete_uat(name: str):
+    """Trigger UAT completion and finalization."""
+    if name not in active_conversations:
+        raise HTTPException(status_code=404, detail="No active UAT conversation for project")
+
+    conversation = active_conversations[name]
+
+    if not conversation.is_active:
+        raise HTTPException(status_code=400, detail="UAT conversation is not active")
+
+    if not hasattr(conversation, 'uat_mode') or not conversation.uat_mode:
+        raise HTTPException(status_code=400, detail="Not in UAT mode")
+
+    # Signal to complete UAT
+    conversation.trigger_uat_completion()
+
+    return {"status": "triggered", "message": "Completing UAT..."}
+
+
 @app.post("/api/projects/{name}/start-work")
 async def start_work(name: str):
     """Start or continue working on the project."""
@@ -343,6 +426,117 @@ async def task_decision(name: str, req: ChatRequest):
 async def continue_work(name: str):
     """Continue working on the project (alias for start-work)."""
     return await start_work(name)
+
+
+@app.get("/api/projects/{name}/status")
+async def get_project_workflow_status(name: str):
+    """Get project workflow status with history."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    status = project_manager.get_workflow_status(name)
+    return {
+        "name": name,
+        "status": status
+    }
+
+
+@app.post("/api/projects/{name}/status")
+async def set_project_workflow_status(name: str, req: StatusUpdateRequest):
+    """Manually set project workflow status (admin override)."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    new_status_str = req.status.lower()
+    reason = req.reason
+
+    try:
+        new_status = ProjectStatus.from_string(new_status_str)
+    except (ValueError, KeyError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Valid values: {[s.value for s in ProjectStatus]}"
+        )
+
+    result = project_manager.set_workflow_status(
+        name=name,
+        new_status=new_status,
+        agent="user",
+        reason=reason
+    )
+
+    # Broadcast status change
+    await broadcast_message({
+        "type": "status_change",
+        "project": name,
+        "new_status": new_status.value,
+        "previous_status": result.get("previous_status"),
+        "reason": reason
+    })
+
+    return result
+
+
+@app.get("/api/projects/{name}/qa-notes")
+async def get_qa_notes(name: str):
+    """Get QA notes for a project."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    notes_path = os.path.join(project_path, "QA", "notes.md")
+    if os.path.exists(notes_path):
+        with open(notes_path, 'r', encoding='utf-8') as f:
+            return {"notes": f.read()}
+    return {"notes": ""}
+
+
+@app.get("/api/projects/{name}/qa-screenshots")
+async def list_qa_screenshots(name: str):
+    """List screenshots in the QA folder."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    qa_path = os.path.join(project_path, "QA")
+    if not os.path.exists(qa_path):
+        return {"screenshots": []}
+
+    screenshots = []
+    for f in os.listdir(qa_path):
+        if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+            screenshots.append({
+                "filename": f,
+                "path": os.path.join(qa_path, f),
+                "url": f"/api/projects/{name}/qa-screenshots/{f}"
+            })
+
+    return {"screenshots": screenshots}
+
+
+@app.get("/api/projects/{name}/qa-screenshots/{filename}")
+async def get_qa_screenshot(name: str, filename: str):
+    """Get a specific screenshot from the QA folder."""
+    from fastapi.responses import FileResponse
+
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    screenshot_path = os.path.join(project_path, "QA", filename)
+    if not os.path.exists(screenshot_path):
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+
+    return FileResponse(screenshot_path)
+
+
+@app.get("/api/playwright/status")
+async def get_playwright_status():
+    """Get Playwright availability and configuration status."""
+    playwright_manager = PlaywrightManager(config)
+    return playwright_manager.get_status()
 
 
 @app.get("/api/config")
