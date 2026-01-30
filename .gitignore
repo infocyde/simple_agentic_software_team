@@ -208,7 +208,7 @@ __marimo__/
 
 # Agentic Software Team specific
 # Projects directory (each project has its own repo)
-projects/*/
+projects/
 
 # Local environment overrides
 .env.local

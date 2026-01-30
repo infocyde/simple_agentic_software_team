@@ -379,21 +379,48 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
         # Fallback: return original task if splitting is not obvious
         return [task]
 
-    async def _replace_task_with_subtasks(self, original_task: str, subtasks: List[str]):
-        """Replace a task in TODO.md with its subtasks."""
+    async def _replace_task_with_subtasks(self, original_task: str, subtasks: List[str]) -> bool:
+        """Replace a task in TODO.md with its subtasks.
+
+        Matches against full raw TODO lines including {ID} prefixes and
+        [depends: ...] suffixes, not just the display text.
+        Returns True if replacement succeeded, False otherwise.
+        """
         todo_path = os.path.join(self.project_path, "TODO.md")
         if not os.path.exists(todo_path):
-            return
+            return False
 
         async with self.todo_lock:
             async with aiofiles.open(todo_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
 
-            # Build replacement text
-            old_line = f"- [ ] {original_task}"
             new_lines = "\n".join([f"- [ ] {st}" for st in subtasks])
 
-            content = content.replace(old_line, new_lines)
+            # Try exact match first
+            old_line = f"- [ ] {original_task}"
+            if old_line in content:
+                content = content.replace(old_line, new_lines)
+            else:
+                # Fuzzy match: find the uncompleted TODO line that contains the
+                # display text (handles {ID} prefix and [depends:] suffix)
+                replaced = False
+                lines = content.split('\n')
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.startswith('- [ ] ') and original_task in stripped:
+                        lines[i] = new_lines
+                        replaced = True
+                        break
+                if replaced:
+                    content = '\n'.join(lines)
+                else:
+                    self._log_activity({
+                        "timestamp": datetime.now().isoformat(),
+                        "agent": "orchestrator",
+                        "action": "Split replacement failed",
+                        "details": f"Could not find TODO line matching: {original_task[:80]}"
+                    })
+                    return False
 
             async with aiofiles.open(todo_path, 'w', encoding='utf-8') as f:
                 await f.write(content)
@@ -404,6 +431,7 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
             "action": "Task split into subtasks",
             "details": f"Created {len(subtasks)} subtasks"
         })
+        return True
 
     async def _suggest_simpler_task(self, original_task: str, error: str) -> str:
         """Create a simpler version of a failed task using local heuristics.
@@ -953,9 +981,11 @@ If the project involves Python, ensure the TODO list includes, near the top, a t
         })
 
         # Estimate complexity (skip for batched tasks)
+        # Use display_text for complexity check to avoid inflated length
+        # from appended retry messages like "(Previous attempt failed: ...)"
         complexity = "medium"
         if "batch" not in task:
-            complexity = await self._estimate_task_complexity(task_text)
+            complexity = await self._estimate_task_complexity(task.get("display_text", task_text))
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -971,15 +1001,17 @@ If the project involves Python, ensure the TODO list includes, near the top, a t
             subtasks = await self._split_large_task(task_text)
 
             if len(subtasks) > 1:
-                await self._replace_task_with_subtasks(task_text, subtasks)
-                await self._send_message("info", f"Split into {len(subtasks)} subtasks")
+                replaced = await self._replace_task_with_subtasks(task_text, subtasks)
+                if replaced:
+                    await self._send_message("info", f"Split into {len(subtasks)} subtasks")
 
-                # Return special status to indicate task was split (not executed)
-                return {
-                    "task": task,
-                    "result": {"status": "split", "result": f"Split into {len(subtasks)} subtasks"},
-                    "agent": "orchestrator"
-                }
+                    # Return special status to indicate task was split (not executed)
+                    return {
+                        "task": task,
+                        "result": {"status": "split", "result": f"Split into {len(subtasks)} subtasks"},
+                        "agent": "orchestrator"
+                    }
+                # Replacement failed — execute the task as-is rather than looping
 
         # Determine agent and execute
         agent_name = self._determine_agent_for_task(task_text)

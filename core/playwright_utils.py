@@ -86,7 +86,7 @@ class PlaywrightManager:
 
     def _check_claude_mcp_config(self) -> bool:
         """Check Claude CLI configuration for Playwright MCP server."""
-        # Common locations for Claude CLI config
+        # Check standalone MCP config files
         config_paths = [
             Path.home() / ".claude" / "mcp_servers.json",
             Path.home() / ".config" / "claude" / "mcp_servers.json",
@@ -107,6 +107,21 @@ class PlaywrightManager:
                                 return True
                 except (json.JSONDecodeError, IOError):
                     continue
+
+        # Check .claude.json which stores mcpServers inline
+        claude_json_path = Path.home() / ".claude.json"
+        if claude_json_path.exists():
+            try:
+                with open(claude_json_path, 'r') as f:
+                    claude_config = json.load(f)
+
+                servers = claude_config.get("mcpServers", {})
+                if isinstance(servers, dict):
+                    for server_name in servers.keys():
+                        if "playwright" in server_name.lower():
+                            return True
+            except (json.JSONDecodeError, IOError):
+                pass
 
         return False
 

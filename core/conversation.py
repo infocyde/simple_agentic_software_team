@@ -238,12 +238,12 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
         # Call Claude CLI
         try:
             # PM conversations always use Opus for better reasoning
+            # Prompt is piped via stdin to avoid Windows command-line length limits
             cmd = [
                 "claude",
                 "--print",
                 "--dangerously-skip-permissions",
-                "--model", "claude-opus-4-20250514",
-                full_prompt
+                "--model", "claude-opus-4-20250514"
             ]
 
             # Set up environment with UTF-8 encoding for Windows
@@ -254,13 +254,14 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=self.project_path,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env
             )
 
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+                process.communicate(input=full_prompt.encode('utf-8')),
                 timeout=120
             )
 
@@ -378,23 +379,24 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
 
         # Run Claude to create the documents (not --print, we want it to actually write files)
         # Use Opus for document creation - needs good reasoning
+        # Prompt is piped via stdin to avoid Windows command-line length limits
         cmd = [
             "claude",
             "--dangerously-skip-permissions",
-            "--model", "claude-opus-4-20250514",
-            create_prompt
+            "--model", "claude-opus-4-20250514"
         ]
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=self.project_path,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
 
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+                process.communicate(input=create_prompt.encode('utf-8')),
                 timeout=180  # 3 minutes for document creation
             )
 
@@ -757,22 +759,23 @@ Make the updates now."""
 
         try:
             # Run Claude to make the updates
+            # Prompt is piped via stdin to avoid Windows command-line length limits
             cmd = [
                 "claude",
                 "--dangerously-skip-permissions",
-                "--model", "claude-opus-4-20250514",
-                analyze_prompt
+                "--model", "claude-opus-4-20250514"
             ]
 
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=self.project_path,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
 
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+                process.communicate(input=analyze_prompt.encode('utf-8')),
                 timeout=180
             )
 
@@ -851,21 +854,22 @@ If details are unknown, note reasonable assumptions and how to verify. Keep it c
 
 Write the runit.md file now.
 """
+        # Prompt is piped via stdin to avoid Windows command-line length limits
         cmd = [
             "claude",
             "--dangerously-skip-permissions",
-            "--model", "claude-opus-4-20250514",
-            prompt
+            "--model", "claude-opus-4-20250514"
         ]
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=self.project_path,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+            stdout, stderr = await asyncio.wait_for(process.communicate(input=prompt.encode('utf-8')), timeout=180)
             output = stdout.decode('utf-8', errors='replace')
             self.log_activity("runit.md generated", output[:200] if output else "Complete")
             await log_cli_call(

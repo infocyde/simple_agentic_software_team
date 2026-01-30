@@ -312,15 +312,10 @@ class BaseAgent(ABC):
             except ProcessLookupError:
                 pass
 
-    # Windows command-line limit is 32,767 chars. Reserve space for the
-    # executable path, flags, and model arg (~500 chars).
-    _MAX_CLI_ARG_LENGTH = 30000
-
     async def _run_claude_cli(self, prompt_file: str, working_dir: str, model: Optional[str] = None) -> str:
         """Run Claude CLI and return the output.
 
-        Passes prompt as a CLI positional argument (required by claude --print).
-        Truncates context if prompt exceeds Windows command-line length limits.
+        Pipes prompt via stdin to avoid Windows command-line length limits.
         Uses process tree kill on timeout to avoid orphaned child processes.
         """
 
@@ -328,38 +323,11 @@ class BaseAgent(ABC):
         with open(prompt_file, 'r', encoding='utf-8') as f:
             prompt_content = f.read()
 
-        # Guard against Windows command-line length limit.
-        # Truncate from the middle (context section) rather than the task,
-        # so the agent always sees the full task description.
-        if len(prompt_content) > self._MAX_CLI_ARG_LENGTH:
-            overflow = len(prompt_content) - self._MAX_CLI_ARG_LENGTH
-            self.log_activity(
-                "Prompt truncated",
-                f"Removed {overflow} chars from context to fit CLI arg limit"
-            )
-            # Find the context section and trim it
-            ctx_marker = "## Current Context"
-            task_marker = "## Your Task"
-            ctx_start = prompt_content.find(ctx_marker)
-            task_start = prompt_content.find(task_marker)
-            if ctx_start != -1 and task_start != -1 and task_start > ctx_start:
-                # Trim the context section, keeping the header and a truncation notice
-                context_section = prompt_content[ctx_start:task_start]
-                max_ctx_len = len(context_section) - overflow - 100  # 100 chars for notice
-                if max_ctx_len > len(ctx_marker) + 50:
-                    truncated_ctx = context_section[:max_ctx_len] + "\n\n[... context truncated for length ...]\n\n"
-                    prompt_content = prompt_content[:ctx_start] + truncated_ctx + prompt_content[task_start:]
-                else:
-                    # Context too small to trim meaningfully, drop it entirely
-                    prompt_content = prompt_content[:ctx_start] + prompt_content[task_start:]
-            else:
-                # No context markers found, truncate from the end as last resort
-                prompt_content = prompt_content[:self._MAX_CLI_ARG_LENGTH - 50] + "\n\n[... truncated for length ...]"
-
         # Build the claude command
         # Using --print for non-interactive output
         # Using --dangerously-skip-permissions for autonomous operation
         # Using --output-format json to capture session_id for continuity
+        # Prompt is piped via stdin (no command-line length limit)
         cmd = [
             "claude",
             "--print",
@@ -376,9 +344,6 @@ class BaseAgent(ABC):
         # Add model flag if specified
         if model:
             cmd.extend(["--model", model])
-
-        # Prompt as positional argument (required by claude --print)
-        cmd.append(prompt_content)
 
         session_info = f" (resuming session)" if resuming else " (new session)"
         model_info = f" (model: {model})" if model else ""
@@ -397,10 +362,14 @@ class BaseAgent(ABC):
         else:
             kwargs['start_new_session'] = True
 
-        # Run the command
+        # Encode prompt for stdin
+        prompt_bytes = prompt_content.encode('utf-8')
+
+        # Run the command with prompt piped via stdin
         process = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=working_dir,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -412,7 +381,10 @@ class BaseAgent(ABC):
 
         try:
             if self.stream_callback:
-                # Debug mode: stream output line-by-line to UI
+                # Debug mode: write prompt to stdin, then stream output line-by-line
+                process.stdin.write(prompt_bytes)
+                await process.stdin.drain()
+                process.stdin.close()
                 output_lines = []
                 while True:
                     line = await process.stdout.readline()
@@ -433,8 +405,8 @@ class BaseAgent(ABC):
                     if error_output.strip():
                         output += f"\n\nStderr:\n{error_output}"
             else:
-                # Normal mode: wait for full output
-                stdout, stderr = await process.communicate()
+                # Normal mode: pipe prompt via stdin and wait for full output
+                stdout, stderr = await process.communicate(input=prompt_bytes)
                 output = stdout.decode('utf-8', errors='replace')
                 if stderr:
                     error_output = stderr.decode('utf-8', errors='replace')

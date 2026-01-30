@@ -1,4 +1,4 @@
-# Agentic Software Team
+# Night Ronin's Agentic Software Team
 
 **A fully autonomous AI development team that builds software for you.**
 
@@ -111,7 +111,7 @@ claude --version
 python main.py
 ```
 
-Open [http://localhost:8000](http://localhost:8000)
+Open [http://localhost:8080](http://localhost:8080) (default port, configurable via `server_port` in config.json)
 
 ---
 
@@ -205,12 +205,15 @@ Each agent runs as a **Claude Code CLI process** (`claude --print`):
 - Minimal, relevant context (recent decisions + sibling tasks)
 - Full tool access (files, commands, web)
 - Auto-selected model (Opus for complex, Sonnet for simple)
+- **Prompts piped via stdin** — no Windows command-line length limits (previously capped at ~30K chars)
 
 **Concurrency:** Each agent type has its own CLI session, but only `max_concurrent_agents` run at once (controlled by an asyncio semaphore). Setting this to 2 means two agents work in parallel; the rest queue.
 
 **Session Continuity:** When `session_continuity` is enabled in config, agents reuse their Claude CLI session across tasks via `--resume <session_id>`. This eliminates cold-start overhead — the agent remembers the codebase, previous decisions, and files from earlier tasks. Sessions reset automatically when a new project or feature starts. Disable with `"session_continuity": false` to revert to stateless mode.
 
 **Timeouts:** Timeouts are not retried (a timed-out prompt will almost certainly time out again). Exceptions are retried up to `max_task_retries` times with error context appended so the agent can adapt.
+
+**Task Splitting:** Large tasks are automatically split into subtasks. Complexity is estimated from the clean task description (ignoring retry metadata) to avoid false positives.
 
 ---
 
@@ -247,7 +250,7 @@ Edit `config.json`:
   "execution": {
     "max_concurrent_agents": 2,
     "task_timeout_seconds": 600,
-    "simple_task_timeout_seconds": 300,
+    "simple_task_timeout_seconds": 600,
     "max_task_retries": 2,
     "allow_cross_section_parallel": true,
     "enable_task_batching": true,
@@ -333,6 +336,8 @@ projects/my-app/
   TODO.md           # Task list with checkboxes
   MEMORY.md         # Decisions and lessons learned
   SUMMARY.md        # Completion summary (after done)
+  log.md            # Full Claude CLI call log (prompts + results)
+  error_log.md      # Error and timeout details
   QA/               # QA notes and screenshots
   src/              # Your actual code
   .git/             # Version controlled from the start
@@ -381,12 +386,17 @@ Install Claude Code CLI from [claude.ai/code](https://claude.ai/code) and ensure
 
 ### Agents timing out
 
-Increase timeout in `config.json`:
+Increase timeouts in `config.json`:
 ```json
 "execution": {
-  "task_timeout": 600
+  "task_timeout_seconds": 600,
+  "simple_task_timeout_seconds": 600
 }
 ```
+
+### Agents stuck in a split loop
+
+If the orchestrator keeps splitting a task without executing it, check TODO.md for malformed lines (e.g. leftover retry messages parsed as separate tasks). Clean up the TODO and restart work.
 
 ### Want more/fewer kickoff questions
 
