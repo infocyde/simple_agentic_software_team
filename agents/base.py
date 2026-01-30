@@ -1,13 +1,16 @@
 """Base agent class that all specialized agents inherit from - uses Claude Code CLI."""
 
 import os
+import sys
 import json
 import asyncio
+import signal
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
+from utils.cli_logger import log_cli_call
 
 
 class BaseAgent(ABC):
@@ -49,7 +52,11 @@ class BaseAgent(ABC):
         self.system_prompt = system_prompt
         self.activity_callback = activity_callback
         self.model_preference = model_preference  # "auto", "opus", or "sonnet"
+        self.stream_callback: Optional[Callable] = None  # Set by orchestrator for debug mode
         self.conversation_history: List[Dict[str, Any]] = []
+        # Session continuity: reuse Claude CLI sessions across tasks
+        self._session_id: Optional[str] = None
+        self._session_continuity: bool = False  # Enabled via config
 
     def log_activity(self, action: str, details: str = ""):
         """Log agent activity for the activity feed."""
@@ -63,6 +70,10 @@ class BaseAgent(ABC):
         if self.activity_callback:
             self.activity_callback(activity)
         return activity
+
+    def reset_session(self):
+        """Clear the stored session ID, forcing a cold start on the next task."""
+        self._session_id = None
 
     def _build_prompt(self, task: str, context: str = "", is_simple: bool = False) -> str:
         """Build the full prompt for Claude CLI."""
@@ -88,17 +99,13 @@ class BaseAgent(ABC):
         prompt_parts.append(task)
         prompt_parts.append("")
 
-        # Add completion instructions
+        # Add minimal instructions — only items that change Claude's default behavior
         prompt_parts.append("## Instructions")
-        prompt_parts.append("- Complete the task described above")
-        prompt_parts.append("- Use the available tools (read/write files, run commands) as needed")
-        prompt_parts.append("- If you need current documentation: first run `python utils/search_docs.py '<library> <topic>'` to find URLs, then use WebFetch to read them")
-        prompt_parts.append("- When finished, provide a brief summary of what you accomplished")
-        prompt_parts.append("- If you encounter issues you cannot resolve, explain what went wrong")
+        prompt_parts.append("- Do NOT open or use Playwright browser tools unless your task specifically requires browser-based testing or visual verification. Writing code, running scripts, and running tests do NOT require a browser.")
+        prompt_parts.append("- For external library docs: run `python utils/search_docs.py '<library> <topic>'` then use WebFetch to read results.")
 
         if is_simple:
-            prompt_parts.append("")
-            prompt_parts.append("NOTE: This is a straightforward task. Complete it quickly and move on -- do not over-engineer, explore unrelated code, or add unnecessary abstractions.")
+            prompt_parts.append("- Be concise. Do not over-engineer, explore unrelated code, or add unnecessary abstractions.")
 
         return "\n".join(prompt_parts)
 
@@ -174,16 +181,30 @@ class BaseAgent(ABC):
         """
         self.log_activity("Starting task", task[:100])
 
+        # Enable session continuity if configured
+        if config:
+            self._session_continuity = config.get('execution', {}).get('session_continuity', False)
+
         # Determine which model to use
         model = self._get_model_for_task(task, config)
 
-        # Apply complexity-based timeout: simple tasks get a shorter leash
+        # Apply complexity-based timeout with context-size awareness
         complexity = self._classify_task_complexity(task)
         if complexity == 'simple' and config:
-            simple_timeout = config.get('execution', {}).get('simple_task_timeout_seconds', 180)
+            simple_timeout = config.get('execution', {}).get('simple_task_timeout_seconds', 300)
             effective_timeout = min(timeout, simple_timeout)
         else:
             effective_timeout = timeout
+
+        # Extend timeout if the prompt + context is large (Claude needs more time
+        # to process large contexts even for "simple" tasks)
+        prompt_size = len(task) + len(context)
+        if prompt_size > 5000:
+            # Add 60s per 5K chars of context, up to doubling the timeout
+            context_extension = min(effective_timeout, (prompt_size // 5000) * 60)
+            effective_timeout += context_extension
+            self.log_activity("Timeout adjusted", f"{effective_timeout}s (large context: {prompt_size} chars)")
+
         timeout = effective_timeout
 
         # Build the prompt (with urgency hint for simple tasks)
@@ -206,6 +227,16 @@ class BaseAgent(ABC):
 
                 self.log_activity("Task complete", result[:100] if result else "No output")
 
+                await log_cli_call(
+                    project_path=project_path,
+                    agent_name=self.name,
+                    agent_role=self.role,
+                    prompt=prompt,
+                    model=model or "default",
+                    status="complete",
+                    result_summary=result[:300] if result else ""
+                )
+
                 return {
                     "status": "complete",
                     "result": result,
@@ -219,6 +250,15 @@ class BaseAgent(ABC):
 
         except asyncio.TimeoutError:
             self.log_activity("Task timeout", f"Exceeded {timeout}s")
+            await log_cli_call(
+                project_path=project_path,
+                agent_name=self.name,
+                agent_role=self.role,
+                prompt=prompt,
+                model=model or "default",
+                status="timeout",
+                result_summary=f"Task timed out after {timeout} seconds"
+            )
             return {
                 "status": "timeout",
                 "result": f"Task timed out after {timeout} seconds",
@@ -226,41 +266,136 @@ class BaseAgent(ABC):
             }
         except Exception as e:
             self.log_activity("Task error", str(e))
+            await log_cli_call(
+                project_path=project_path,
+                agent_name=self.name,
+                agent_role=self.role,
+                prompt=prompt,
+                model=model or "default",
+                status="error",
+                result_summary=str(e)[:300]
+            )
             return {
                 "status": "error",
                 "result": str(e),
                 "agent": self.name
             }
 
+    def _kill_process_tree(self, process):
+        """Kill a process and all its children. Critical on Windows where
+        terminate() only kills the parent, leaving child processes orphaned."""
+        pid = process.pid
+        try:
+            if sys.platform == 'win32':
+                # On Windows, use taskkill /T to kill the entire process tree
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10
+                )
+            else:
+                # On Unix, kill the process group
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                # Fallback: kill the process directly
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+        except Exception:
+            # Last resort: just try terminate
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+
+    # Windows command-line limit is 32,767 chars. Reserve space for the
+    # executable path, flags, and model arg (~500 chars).
+    _MAX_CLI_ARG_LENGTH = 30000
+
     async def _run_claude_cli(self, prompt_file: str, working_dir: str, model: Optional[str] = None) -> str:
-        """Run Claude CLI and return the output."""
+        """Run Claude CLI and return the output.
+
+        Passes prompt as a CLI positional argument (required by claude --print).
+        Truncates context if prompt exceeds Windows command-line length limits.
+        Uses process tree kill on timeout to avoid orphaned child processes.
+        """
 
         # Read prompt from file
         with open(prompt_file, 'r', encoding='utf-8') as f:
             prompt_content = f.read()
 
+        # Guard against Windows command-line length limit.
+        # Truncate from the middle (context section) rather than the task,
+        # so the agent always sees the full task description.
+        if len(prompt_content) > self._MAX_CLI_ARG_LENGTH:
+            overflow = len(prompt_content) - self._MAX_CLI_ARG_LENGTH
+            self.log_activity(
+                "Prompt truncated",
+                f"Removed {overflow} chars from context to fit CLI arg limit"
+            )
+            # Find the context section and trim it
+            ctx_marker = "## Current Context"
+            task_marker = "## Your Task"
+            ctx_start = prompt_content.find(ctx_marker)
+            task_start = prompt_content.find(task_marker)
+            if ctx_start != -1 and task_start != -1 and task_start > ctx_start:
+                # Trim the context section, keeping the header and a truncation notice
+                context_section = prompt_content[ctx_start:task_start]
+                max_ctx_len = len(context_section) - overflow - 100  # 100 chars for notice
+                if max_ctx_len > len(ctx_marker) + 50:
+                    truncated_ctx = context_section[:max_ctx_len] + "\n\n[... context truncated for length ...]\n\n"
+                    prompt_content = prompt_content[:ctx_start] + truncated_ctx + prompt_content[task_start:]
+                else:
+                    # Context too small to trim meaningfully, drop it entirely
+                    prompt_content = prompt_content[:ctx_start] + prompt_content[task_start:]
+            else:
+                # No context markers found, truncate from the end as last resort
+                prompt_content = prompt_content[:self._MAX_CLI_ARG_LENGTH - 50] + "\n\n[... truncated for length ...]"
+
         # Build the claude command
         # Using --print for non-interactive output
         # Using --dangerously-skip-permissions for autonomous operation
+        # Using --output-format json to capture session_id for continuity
         cmd = [
             "claude",
             "--print",
-            "--dangerously-skip-permissions"
+            "--dangerously-skip-permissions",
+            "--output-format", "json"
         ]
+
+        # Session continuity: resume a previous session to avoid cold-start overhead
+        resuming = False
+        if self._session_continuity and self._session_id:
+            cmd.extend(["--resume", self._session_id])
+            resuming = True
 
         # Add model flag if specified
         if model:
             cmd.extend(["--model", model])
 
+        # Prompt as positional argument (required by claude --print)
         cmd.append(prompt_content)
 
+        session_info = f" (resuming session)" if resuming else " (new session)"
         model_info = f" (model: {model})" if model else ""
-        self.log_activity("Invoking Claude CLI", f"Working dir: {working_dir}{model_info}")
+        self.log_activity("Invoking Claude CLI", f"Working dir: {working_dir}{model_info}{session_info}")
 
         # Set up environment with UTF-8 encoding for Windows compatibility
         env = os.environ.copy()
         env['PYTHONIOENCODING'] = 'utf-8'
         env['PYTHONUTF8'] = '1'
+
+        # On Windows, create a new process group so we can kill the tree on timeout.
+        # On Unix, use start_new_session for the same effect.
+        kwargs = {}
+        if sys.platform == 'win32':
+            kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs['start_new_session'] = True
 
         # Run the command
         process = await asyncio.create_subprocess_exec(
@@ -268,20 +403,54 @@ class BaseAgent(ABC):
             cwd=working_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=env
+            env=env,
+            **kwargs
         )
 
         # Start heartbeat task to log progress
         heartbeat_task = asyncio.create_task(self._heartbeat_logger(process))
 
         try:
-            stdout, stderr = await process.communicate()
+            if self.stream_callback:
+                # Debug mode: stream output line-by-line to UI
+                output_lines = []
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    decoded = line.decode('utf-8', errors='replace')
+                    output_lines.append(decoded)
+                    try:
+                        await self.stream_callback(self.name, decoded)
+                    except Exception:
+                        pass  # Never let streaming errors break the task
+                await process.wait()
+                output = ''.join(output_lines)
+                # Still capture stderr
+                stderr_data = await process.stderr.read()
+                if stderr_data:
+                    error_output = stderr_data.decode('utf-8', errors='replace')
+                    if error_output.strip():
+                        output += f"\n\nStderr:\n{error_output}"
+            else:
+                # Normal mode: wait for full output
+                stdout, stderr = await process.communicate()
+                output = stdout.decode('utf-8', errors='replace')
+                if stderr:
+                    error_output = stderr.decode('utf-8', errors='replace')
+                    if error_output.strip():
+                        output += f"\n\nStderr:\n{error_output}"
         except asyncio.CancelledError:
+            # Kill the entire process tree, not just the parent
+            self._kill_process_tree(process)
             try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-            await process.wait()
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                # Process didn't exit after tree kill, force terminate
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
             raise
         finally:
             heartbeat_task.cancel()
@@ -290,12 +459,9 @@ class BaseAgent(ABC):
             except asyncio.CancelledError:
                 pass
 
-        # Decode with error handling for special characters
-        output = stdout.decode('utf-8', errors='replace')
-        if stderr:
-            error_output = stderr.decode('utf-8', errors='replace')
-            if error_output.strip():
-                output += f"\n\nStderr:\n{error_output}"
+        # Parse JSON output to extract result text and session_id.
+        # --output-format json wraps the response in a JSON envelope.
+        output = self._parse_cli_json_output(output)
 
         # Clean any problematic characters that might cause issues downstream
         output = self._sanitize_output(output)
@@ -319,6 +485,46 @@ class BaseAgent(ABC):
                 self.log_activity("Still working...", f"Elapsed: {time_str}")
         except asyncio.CancelledError:
             pass
+
+    def _parse_cli_json_output(self, raw_output: str) -> str:
+        """Parse JSON envelope from --output-format json and extract the result text.
+
+        Also captures the session_id for session continuity on subsequent calls.
+        Falls back to returning raw output if JSON parsing fails.
+        """
+        if not raw_output or not raw_output.strip():
+            return raw_output
+
+        try:
+            # The JSON output may contain stderr noise before the JSON object.
+            # Find the first '{' to locate the JSON start.
+            trimmed = raw_output.strip()
+            json_start = trimmed.find('{')
+            if json_start == -1:
+                return raw_output
+            data = json.loads(trimmed[json_start:])
+
+            # Capture session_id for continuity
+            sid = data.get("session_id")
+            if sid and self._session_continuity:
+                if self._session_id != sid:
+                    self.log_activity("Session tracked", f"ID: {sid[:12]}...")
+                self._session_id = sid
+
+            # If the CLI reported an error, reset session (it may be stale)
+            if data.get("is_error"):
+                self.log_activity("Session reset", "CLI reported error; clearing session")
+                self._session_id = None
+
+            # Return the result text, falling back to raw output
+            return data.get("result", raw_output)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # Not valid JSON — could be an error message or legacy plain-text output.
+            # If we were resuming and got a non-JSON error, the session may be stale.
+            if self._session_id:
+                self.log_activity("Session reset", "Non-JSON response; clearing stale session")
+                self._session_id = None
+            return raw_output
 
     def _sanitize_output(self, text: str) -> str:
         """Remove or replace characters that might cause encoding issues."""

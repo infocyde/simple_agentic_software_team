@@ -17,23 +17,24 @@ class QATesterAgent(BaseAgent):
         if playwright_available:
             playwright_instructions = """
 
-PLAYWRIGHT BROWSER TESTING:
-You have access to Playwright for browser-based testing. Use it to:
-1. Navigate to the application URL
-2. Take screenshots for visual verification (save to QA folder)
-3. Interact with UI elements (click, type, etc.)
-4. Verify visual appearance and layouts
-5. Test user flows end-to-end
+PLAYWRIGHT BROWSER TESTING - MANDATORY PROCEDURE:
+You have Playwright available. You MUST follow this exact sequence whenever you use the browser.
 
-Screenshot naming: screenshot_[timestamp]_[test_name].png
-Always document what each screenshot captures.
+STEP 1 - KILL STALE SESSION (do this BEFORE any browser interaction):
+  Call browser_close immediately. This shuts down any leftover browser from a previous session.
+  If it errors (no browser open), that is fine -- ignore the error and continue.
 
-Use Playwright tools like:
-- browser_navigate: Open URLs
-- browser_snapshot: Get page accessibility tree
-- browser_click: Click elements
-- browser_type: Enter text
-- browser_take_screenshot: Capture screenshots
+STEP 2 - OPEN AND TEST:
+  Now use browser_navigate to open the application URL. This starts a clean browser session.
+  Perform your testing:
+  - browser_snapshot to get the page accessibility tree
+  - browser_click / browser_type to interact with elements
+  - browser_take_screenshot to capture evidence (save to QA folder)
+  - Screenshot naming: screenshot_[timestamp]_[test_name].png
+
+STEP 3 - CLOSE BROWSER WHEN DONE (mandatory, do not skip):
+  When ALL testing is complete, call browser_close as your LAST tool call.
+  Do not leave the browser open. Do not skip this step.
 """
 
         system_prompt = f"""You are the QA Tester on an agentic development team.

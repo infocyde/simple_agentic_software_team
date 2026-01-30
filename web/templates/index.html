@@ -132,6 +132,10 @@
                         </label>
                         <button id="saveGatesBtn" class="btn btn-secondary btn-small">Save Gates</button>
                         <span id="gatesStatus" class="gates-status"></span>
+                        <label class="gate-toggle" style="margin-left: 16px;">
+                            <input type="checkbox" id="debugToggle">
+                            <span>Debug Mode</span>
+                        </label>
                     </div>
 
                     <div class="tabs">
@@ -139,6 +143,8 @@
                         <button class="tab active" data-tab="activity">Activity</button>
                         <button class="tab" data-tab="spec">Spec</button>
                         <button class="tab" data-tab="todo">TODO</button>
+                        <button class="tab" data-tab="log">Log</button>
+                        <button class="tab" data-tab="debug" id="debugTabBtn" style="display: none;">Debug</button>
                     </div>
 
                     <div class="tab-content">
@@ -172,6 +178,14 @@
                         </div>
                         <div id="todoTab" class="tab-pane" style="display: none;">
                             <pre id="todoContent" class="content-display"></pre>
+                        </div>
+                        <div id="logTab" class="tab-pane" style="display: none;">
+                            <pre id="logContent" class="content-display"></pre>
+                        </div>
+                        <div id="debugTab" class="tab-pane" style="display: none;">
+                            <div id="debugOutput" style="font-family: monospace; font-size: 12px; max-height: 600px; overflow-y: auto; background: #1a1a2e; color: #0f0; padding: 10px; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word;">
+                                <p style="color: #666;">Debug mode streams real-time output from agents. Enable debug mode and start work to see output here.</p>
+                            </div>
                         </div>
                     </div>
                 </div>

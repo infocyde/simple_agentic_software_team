@@ -18,6 +18,30 @@ class AgenticTeamApp {
         this.connectWebSocket();
         this.bindEvents();
         this.initSplash();
+        this.initDebugMode();
+    }
+
+    async initDebugMode() {
+        try {
+            const res = await fetch('/api/config');
+            const config = await res.json();
+            const enabled = config.debug?.enabled || false;
+
+            const toggle = document.getElementById('debugToggle');
+            if (toggle) toggle.checked = enabled;
+
+            const debugTabBtn = document.getElementById('debugTabBtn');
+            if (debugTabBtn) {
+                debugTabBtn.style.display = enabled ? 'inline-block' : 'none';
+            }
+
+            const output = document.getElementById('debugOutput');
+            if (output && enabled) {
+                output.innerHTML = '<p style="color: #666;">Debug mode enabled. Waiting for work to start...</p>';
+            }
+        } catch (error) {
+            console.error('Error initializing debug mode:', error);
+        }
     }
 
     connectWebSocket() {
@@ -155,6 +179,10 @@ class AgenticTeamApp {
                 this.handleUatComplete(data);
                 break;
 
+            case 'debug_output':
+                this.appendDebugLine(data.agent, data.line);
+                break;
+
             default:
                 // Legacy activity format
                 if (data.agent && data.action) {
@@ -209,6 +237,7 @@ class AgenticTeamApp {
         document.getElementById('cancelMessage').addEventListener('click', () => this.hideModals());
         document.getElementById('messageForm').addEventListener('submit', (e) => this.startConversation(e));
         document.getElementById('saveGatesBtn').addEventListener('click', () => this.saveQualityGates());
+        document.getElementById('debugToggle').addEventListener('change', (e) => this.toggleDebugMode(e.target.checked));
         document.getElementById('cancelChangeStatus').addEventListener('click', () => this.hideModals());
         document.getElementById('changeStatusForm').addEventListener('submit', (e) => this.changeProjectStatus(e));
 
@@ -601,6 +630,11 @@ class AgenticTeamApp {
             pane.style.display = 'none';
         });
         document.getElementById(`${tabName}Tab`).style.display = 'block';
+
+        // Load log content when switching to log tab
+        if (tabName === 'log') {
+            this.loadLog();
+        }
     }
 
     // Chat methods
@@ -1290,6 +1324,67 @@ class AgenticTeamApp {
 
         } catch (error) {
             console.error('Error sending decision:', error);
+        }
+    }
+
+    async loadLog() {
+        if (!this.currentProject) return;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/log`);
+            const data = await res.json();
+            document.getElementById('logContent').textContent = data.log || 'No CLI call log yet. Log entries appear when agents invoke Claude Code.';
+        } catch (error) {
+            console.error('Error loading log:', error);
+            document.getElementById('logContent').textContent = 'Error loading log.';
+        }
+    }
+
+    appendDebugLine(agent, line) {
+        const output = document.getElementById('debugOutput');
+        if (!output) return;
+
+        // Remove placeholder message if present
+        const placeholder = output.querySelector('p');
+        if (placeholder) placeholder.remove();
+
+        const el = document.createElement('div');
+        el.style.marginBottom = '1px';
+        el.innerHTML = `<span style="color: #0ff; font-weight: bold;">[${this.formatAgentName(agent)}]</span> ${this.escapeHtml(line)}`;
+        output.appendChild(el);
+
+        // Auto-scroll to bottom
+        output.scrollTop = output.scrollHeight;
+
+        // Limit DOM nodes to prevent memory issues
+        while (output.children.length > 5000) {
+            output.removeChild(output.firstChild);
+        }
+    }
+
+    async toggleDebugMode(enabled) {
+        try {
+            await fetch('/api/config/debug', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled })
+            });
+
+            // Show/hide debug tab
+            const debugTabBtn = document.getElementById('debugTabBtn');
+            if (debugTabBtn) {
+                debugTabBtn.style.display = enabled ? 'inline-block' : 'none';
+            }
+
+            // Clear debug output when disabling
+            if (!enabled) {
+                const output = document.getElementById('debugOutput');
+                if (output) {
+                    output.innerHTML = '<p style="color: #666;">Debug mode disabled. Enable debug mode and start work to see output here.</p>';
+                }
+            }
+        } catch (error) {
+            console.error('Error toggling debug mode:', error);
         }
     }
 }

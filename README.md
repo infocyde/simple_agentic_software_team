@@ -45,13 +45,12 @@ The result: better architecture, cleaner code, fewer blind spots.
 
 ### Token-Efficient Context
 
-Each agent starts fresh with **minimal context** - just what it needs:
+Each agent receives **minimal injected context** - just what it needs:
 - Recent decisions (last 5)
-- Spec summary (500 chars)
-- Related tasks in current section only
-- No bloat from completed tasks or unrelated sections
+- Sibling tasks in the current section only (max 3, uncompleted only)
+- No spec dump, no completed tasks, no unrelated sections
 
-This keeps API costs low and agents focused.
+With **session continuity** enabled, agents retain codebase knowledge from prior tasks — no re-reading files they already know. This keeps API costs low and agents focused.
 
 ### Live Documentation Lookup
 
@@ -199,11 +198,19 @@ Workflow summary:
 WIP → Testing → Security Review → QA → UAT → Done
 ```
 
-Each agent is a **fresh Claude Code CLI invocation** with:
+### Agent Execution Model
+
+Each agent runs as a **Claude Code CLI process** (`claude --print`):
 - Specialized system prompt for its role
-- Minimal, relevant context
+- Minimal, relevant context (recent decisions + sibling tasks)
 - Full tool access (files, commands, web)
 - Auto-selected model (Opus for complex, Sonnet for simple)
+
+**Concurrency:** Each agent type has its own CLI session, but only `max_concurrent_agents` run at once (controlled by an asyncio semaphore). Setting this to 2 means two agents work in parallel; the rest queue.
+
+**Session Continuity:** When `session_continuity` is enabled in config, agents reuse their Claude CLI session across tasks via `--resume <session_id>`. This eliminates cold-start overhead — the agent remembers the codebase, previous decisions, and files from earlier tasks. Sessions reset automatically when a new project or feature starts. Disable with `"session_continuity": false` to revert to stateless mode.
+
+**Timeouts:** Timeouts are not retried (a timed-out prompt will almost certainly time out again). Exceptions are retried up to `max_task_retries` times with error context appended so the agent can adapt.
 
 ---
 
@@ -238,12 +245,14 @@ Edit `config.json`:
     }
   },
   "execution": {
-    "max_concurrent_agents": 4,
+    "max_concurrent_agents": 2,
     "task_timeout_seconds": 600,
-    "max_task_retries": 3,
+    "simple_task_timeout_seconds": 300,
+    "max_task_retries": 2,
     "allow_cross_section_parallel": true,
     "enable_task_batching": true,
-    "task_batch_size": 2
+    "task_batch_size": 7,
+    "session_continuity": true
   }
 }
 ```
@@ -393,10 +402,12 @@ Adjust in `config.json`:
 
 This system is designed to minimize token usage:
 
-- **Minimal context per task** - Agents get only what they need
+- **Session continuity** - Agents resume their CLI session across tasks, eliminating cold-start re-discovery of the codebase
+- **Minimal injected context** - Only recent decisions and sibling tasks; agents read files themselves as needed
 - **Smart model routing** - Sonnet for simple tasks, Opus for complex
 - **Concise task lists** - 10-30 meaningful tasks, not 200 micro-steps
-- **No context accumulation** - Each task starts fresh
+- **No timeout retries** - Timed-out tasks escalate instead of burning tokens retrying
+- **Error-aware retries** - Exception retries include the previous error so the agent adapts instead of repeating the same mistake
 
 You're already paying for Claude Code. This just uses it smarter.
 

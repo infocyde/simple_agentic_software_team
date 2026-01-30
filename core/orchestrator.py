@@ -91,7 +91,7 @@ class Orchestrator:
         exec_config = config.get('execution', {})
         self.max_concurrent = exec_config.get('max_concurrent_agents', 3)
         self.task_timeout = exec_config.get('task_timeout_seconds', 600)
-        self.simple_task_timeout = exec_config.get('simple_task_timeout_seconds', 180)
+        self.simple_task_timeout = exec_config.get('simple_task_timeout_seconds', 300)
         self.max_task_retries = exec_config.get('max_task_retries', 3)
         self.allow_cross_section_parallel = exec_config.get('allow_cross_section_parallel', True)
         self.enable_task_batching = exec_config.get('enable_task_batching', True)
@@ -145,6 +145,32 @@ class Orchestrator:
                 playwright_available=self.playwright_available
             )
         }
+
+        # Wire debug streaming if enabled
+        debug_enabled = self.config.get('debug', {}).get('enabled', False)
+        if debug_enabled and self.message_callback:
+            for agent_name, agent in self.agents.items():
+                agent.stream_callback = self._make_stream_callback(agent_name)
+
+    def _make_stream_callback(self, agent_name: str):
+        """Create a stream callback for debug mode that broadcasts lines via WebSocket."""
+        async def stream_cb(name: str, line: str):
+            if self.message_callback:
+                await self.message_callback({
+                    "type": "debug_output",
+                    "agent": name,
+                    "line": line,
+                    "timestamp": datetime.now().isoformat()
+                })
+        return stream_cb
+
+    def set_debug_mode(self, enabled: bool):
+        """Enable or disable debug streaming on all agents at runtime."""
+        for agent_name, agent in self.agents.items():
+            if enabled and self.message_callback:
+                agent.stream_callback = self._make_stream_callback(agent_name)
+            else:
+                agent.stream_callback = None
 
     def _log_activity(self, activity: Dict[str, Any]):
         """Log an activity and notify listeners."""
@@ -380,40 +406,20 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
         })
 
     async def _suggest_simpler_task(self, original_task: str, error: str) -> str:
-        """Use PM to suggest a simpler version of a failed task."""
-        pm = self.agents["project_manager"]
+        """Create a simpler version of a failed task using local heuristics.
 
-        simplify_prompt = f"""A task has failed and we need a simpler version.
+        Avoids burning a full CLI round-trip (and its tokens) just to rephrase a string.
+        Strips the task to its core intent and adds a focus hint with the error context.
+        """
+        # Take the first sentence or first 120 chars as the core intent
+        core = original_task.split('.')[0].split(';')[0].strip()
+        if len(core) > 120:
+            core = core[:120].rsplit(' ', 1)[0]
 
-Original task: {original_task}
-Error encountered: {error[:300]}
+        # Build a brief error hint so the retry knows what to avoid
+        error_brief = error.split('\n')[0][:100].strip()
 
-Please suggest a simpler, more focused version of this task that:
-1. Accomplishes the core goal
-2. Avoids the complexity that caused the error
-3. Can be done in a single step
-
-Respond with ONLY the new task description, nothing else."""
-
-        try:
-            result = await pm.process_task(
-                task=simplify_prompt,
-                project_path=self.project_path,
-                context="",
-                orchestrator=self,
-                timeout=60
-            )
-
-            if result["status"] == "complete":
-                new_task = result["result"].strip()
-                # Clean up - remove quotes if present
-                new_task = new_task.strip('"\'')
-                return new_task
-        except Exception:
-            pass
-
-        # Fallback: just simplify by truncating
-        return f"[SIMPLIFIED] {original_task[:50]}..."
+        return f"{core}. (Previous attempt failed: {error_brief}. Keep the implementation minimal.)"
 
     async def route_message(
         self,
@@ -441,7 +447,8 @@ Respond with ONLY the new task description, nothing else."""
             task=message,
             project_path=self.project_path,
             context=context,
-            orchestrator=self
+            orchestrator=self,
+            config=self.config
         )
 
         return result.get("result", "No response")
@@ -507,10 +514,22 @@ Respond with ONLY the new task description, nothing else."""
         if not context:
             context = self.memory.get_context_for_task(task)
 
-        # Execute with retry logic
+        # Execute with retry logic.
+        # Timeouts are NOT retried — the same prompt will almost certainly
+        # timeout again, burning tokens for nothing.  Let the higher-level
+        # _execute_tasks escalation (modify/skip/user prompt) handle it.
+        # Exceptions ARE retried with an error hint appended so the agent
+        # knows what went wrong on the previous attempt.
         retries = 0
+        last_error: Optional[str] = None
 
         while retries < self.max_task_retries:
+            # On retry, append the previous error so the agent can adapt
+            effective_task = task
+            if last_error:
+                error_brief = last_error.split('\n')[0][:150].strip()
+                effective_task = f"{task}\n\n(Previous attempt failed: {error_brief}. Adjust your approach.)"
+
             try:
                 # Notify UI that agent is starting
                 await self._notify_agent_start(agent_name)
@@ -518,7 +537,7 @@ Respond with ONLY the new task description, nothing else."""
                 # Use semaphore to limit concurrent agents
                 async with self.semaphore:
                     result = await agent.process_task(
-                        task=task,
+                        task=effective_task,
                         project_path=self.project_path,
                         context=context,
                         orchestrator=self,
@@ -536,32 +555,36 @@ Respond with ONLY the new task description, nothing else."""
                     return result
 
                 if result["status"] == "timeout":
+                    # Don't retry timeouts — same prompt will likely timeout again
                     self.total_failures += 1
                     self._log_activity({
                         "timestamp": datetime.now().isoformat(),
                         "agent": "orchestrator",
-                        "action": f"Timeout ({retries + 1}/{self.max_task_retries})",
-                        "details": f"Task timed out after {self.task_timeout}s"
+                        "action": "Timeout (no retry)",
+                        "details": f"Task timed out after {self.task_timeout}s — skipping retry to save tokens"
                     })
-                    # Log timeout to error_log.md
                     await self._log_error(
                         error_type="timeout",
                         task=task,
-                        error_details=f"Task timed out after {self.task_timeout}s (attempt {retries + 1}/{self.max_task_retries})",
+                        error_details=f"Task timed out after {self.task_timeout}s (not retried)",
                         agent=agent_name
                     )
+                    return {
+                        "status": "timeout",
+                        "result": f"Task timed out after {self.task_timeout}s"
+                    }
 
             except Exception as e:
                 await self._notify_agent_complete(agent_name)
                 self.total_failures += 1
                 error_msg = str(e).encode('ascii', errors='replace').decode('ascii')
+                last_error = error_msg
                 self._log_activity({
                     "timestamp": datetime.now().isoformat(),
                     "agent": "orchestrator",
                     "action": f"Task error ({retries + 1}/{self.max_task_retries})",
                     "details": error_msg[:200]
                 })
-                # Log exception to error_log.md
                 await self._log_error(
                     error_type="exception",
                     task=task,
@@ -592,8 +615,14 @@ Respond with ONLY the new task description, nothing else."""
             "result": f"Task failed after {self.max_task_retries} retries"
         }
 
+    def _reset_all_sessions(self):
+        """Reset CLI session IDs on all agents so they start fresh."""
+        for agent in self.agents.values():
+            agent.reset_session()
+
     async def start_project_kickoff(self, initial_request: str) -> Dict[str, Any]:
         """Start a new project with the PM asking kickoff questions."""
+        self._reset_all_sessions()
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
             "agent": "orchestrator",
@@ -616,13 +645,15 @@ If the project involves Python, make sure the TODO list includes, near the top, 
             task=kickoff_task,
             project_path=self.project_path,
             context="",
-            orchestrator=self
+            orchestrator=self,
+            config=self.config
         )
 
         return result
 
     async def start_feature_request(self, feature_request: str) -> Dict[str, Any]:
         """Handle a new feature request on an existing project."""
+        self._reset_all_sessions()
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
             "agent": "orchestrator",
@@ -655,7 +686,8 @@ If the project involves Python, ensure the TODO list includes, near the top, a t
             task=feature_task,
             project_path=self.project_path,
             context=self.memory.get_project_summary(),
-            orchestrator=self
+            orchestrator=self,
+            config=self.config
         )
 
         return result
@@ -1433,7 +1465,8 @@ Report any blocking issues that must be fixed before proceeding."""
             task=review_task,
             project_path=self.project_path,
             context="",
-            orchestrator=self
+            orchestrator=self,
+            config=self.config
         )
 
         return result
@@ -1638,10 +1671,11 @@ Report any blocking issues that must be fixed before proceeding."""
         """Ask the Testing Agent to create or update minimal tests as needed."""
         tests_exist = self._detect_pytests()
 
+        if tests_exist and not allow_update:
+            return {"status": "skipped", "result": "Tests already exist; update not required."}
+
         try:
             await self._notify_agent_start("testing_agent")
-            if tests_exist and not allow_update:
-                return {"status": "skipped", "result": "Tests already exist; update not required."}
 
             prompt = """Create or update a minimal pytest test suite for this project.
 
@@ -1657,7 +1691,8 @@ Requirements:
                 project_path=self.project_path,
                 context=self.memory.get_project_summary(),
                 orchestrator=self,
-                timeout=min(self.task_timeout, 300)
+                timeout=min(self.task_timeout, 300),
+                config=self.config
             )
             return result
         except Exception:
@@ -1739,12 +1774,22 @@ Requirements:
         playwright_note = ""
         if self.playwright_available:
             playwright_note = f"""
-You have Playwright available for browser-based testing.
-- Use browser_navigate to open the application
-- Use browser_take_screenshot to capture evidence (save to the QA folder)
-- Verify the UI matches the spec requirements
-- IMPORTANT: Port {mgmt_port} is reserved for the management interface. NEVER navigate to localhost:{mgmt_port}. If the project runs a web server, make sure it uses a DIFFERENT port (e.g. 3000, 5000, 5173, 8000, 9000, etc.).
-- IMPORTANT: When you are finished testing, close the browser with browser_close to clean up all tabs. This prevents stale tabs from persisting into future test runs.
+PLAYWRIGHT BROWSER TESTING - MANDATORY PROCEDURE:
+
+STEP 1 - KILL STALE SESSION (do this BEFORE any browser interaction):
+  Call browser_close immediately. This shuts down any leftover browser from a previous session.
+  If it errors (no browser open), that is fine -- ignore the error and continue.
+
+STEP 2 - OPEN AND TEST:
+  Use browser_navigate to open the application URL. This starts a clean browser session.
+  - Use browser_take_screenshot to capture evidence (save to the QA folder)
+  - Verify the UI matches the spec requirements
+  - Port {mgmt_port} is reserved for the management interface. NEVER navigate to localhost:{mgmt_port}.
+    If the project runs a web server, make sure it uses a DIFFERENT port (e.g. 3000, 5000, 5173, 8000, 9000, etc.).
+
+STEP 3 - CLOSE BROWSER WHEN DONE (mandatory, do not skip):
+  When ALL testing is complete, call browser_close as your LAST tool call.
+  Do not leave the browser open.
 """
 
         qa_task = f"""Perform QA testing on this project to verify it meets the specification.
@@ -1781,7 +1826,8 @@ If issues are found, report them in the format above so they can be added to TOD
                 project_path=self.project_path,
                 context=self.memory.get_project_summary(),
                 orchestrator=self,
-                timeout=self.task_timeout * 2  # Give QA more time
+                timeout=self.task_timeout * 2,  # Give QA more time
+                config=self.config
             )
 
             await self._notify_agent_complete("qa_tester")

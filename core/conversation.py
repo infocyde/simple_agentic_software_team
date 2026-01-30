@@ -6,6 +6,7 @@ import subprocess
 import json
 from typing import Dict, Any, Optional, Callable, List
 from datetime import datetime
+from utils.cli_logger import log_cli_call
 
 
 class ConversationManager:
@@ -268,6 +269,16 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
             # Sanitize output to avoid encoding issues
             output = self._sanitize_output(output)
 
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM Conversation",
+                prompt=full_prompt,
+                model="claude-opus-4-20250514",
+                status="complete" if output else "error",
+                result_summary=output[:300] if output else "(no output)"
+            )
+
             if not output and stderr:
                 error = stderr.decode('utf-8', errors='replace')
                 self.log_activity("Claude error", error[:200])
@@ -277,9 +288,26 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
 
         except asyncio.TimeoutError:
             self.log_activity("Claude timeout")
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM Conversation",
+                prompt=full_prompt,
+                model="claude-opus-4-20250514",
+                status="timeout"
+            )
             return None
         except Exception as e:
             self.log_activity("Claude error", str(e))
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM Conversation",
+                prompt=full_prompt,
+                model="claude-opus-4-20250514",
+                status="error",
+                result_summary=str(e)[:300]
+            )
             return None
 
     def _sanitize_output(self, text: str) -> str:
@@ -373,13 +401,40 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
             output = stdout.decode('utf-8', errors='replace')
             self.log_activity("Documents created", output[:200] if output else "Complete")
 
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM Document Creation",
+                prompt=create_prompt,
+                model="claude-opus-4-20250514",
+                status="complete",
+                result_summary=output[:300] if output else ""
+            )
+
         except asyncio.TimeoutError:
             self.log_activity("Document creation timeout")
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM Document Creation",
+                prompt=create_prompt,
+                model="claude-opus-4-20250514",
+                status="timeout"
+            )
             await self.send_message("system", "Document creation timed out. Please try again.", "error")
             self.is_active = False
             return
         except Exception as e:
             self.log_activity("Document creation error", str(e))
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM Document Creation",
+                prompt=create_prompt,
+                model="claude-opus-4-20250514",
+                status="error",
+                result_summary=str(e)[:300]
+            )
             await self.send_message("system", f"Error creating documents: {str(e)}", "error")
             self.is_active = False
             return
@@ -724,6 +779,16 @@ Make the updates now."""
             output = stdout.decode('utf-8', errors='replace')
             self.log_activity("UAT feedback processed", output[:200] if output else "Complete")
 
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM UAT Feedback",
+                prompt=analyze_prompt,
+                model="claude-opus-4-20250514",
+                status="complete",
+                result_summary=output[:300] if output else ""
+            )
+
             # Send completion message
             await self.send_message(
                 "project_manager",
@@ -803,9 +868,35 @@ Write the runit.md file now.
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
             output = stdout.decode('utf-8', errors='replace')
             self.log_activity("runit.md generated", output[:200] if output else "Complete")
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM RunIt Generation",
+                prompt=prompt,
+                model="claude-opus-4-20250514",
+                status="complete",
+                result_summary=output[:300] if output else ""
+            )
         except asyncio.TimeoutError:
             self.log_activity("runit.md generation timeout")
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM RunIt Generation",
+                prompt=prompt,
+                model="claude-opus-4-20250514",
+                status="timeout"
+            )
             await self.send_message("system", "runit.md generation timed out.", "error")
         except Exception as e:
             self.log_activity("runit.md generation error", str(e))
+            await log_cli_call(
+                project_path=self.project_path,
+                agent_name="project_manager",
+                agent_role="PM RunIt Generation",
+                prompt=prompt,
+                model="claude-opus-4-20250514",
+                status="error",
+                result_summary=str(e)[:300]
+            )
             await self.send_message("system", f"Error generating runit.md: {str(e)}", "error")

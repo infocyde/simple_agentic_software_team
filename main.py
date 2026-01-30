@@ -187,6 +187,20 @@ async def get_project_todo(name: str):
     return {"todo": ""}
 
 
+@app.get("/api/projects/{name}/log")
+async def get_project_log(name: str):
+    """Get project Claude CLI call log."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    log_path = os.path.join(project_path, "log.md")
+    if os.path.exists(log_path):
+        with open(log_path, 'r', encoding='utf-8') as f:
+            return {"log": f.read()}
+    return {"log": ""}
+
+
 @app.get("/api/projects/{name}/activity")
 async def get_project_activity(name: str, limit: int = 50):
     """Get recent activity for a project."""
@@ -654,6 +668,25 @@ async def update_config(new_config: Dict[str, Any]):
         json.dump(config, f, indent=2)
 
     return {"status": "updated", "config": config}
+
+
+@app.post("/api/config/debug")
+async def toggle_debug(req: Dict[str, Any]):
+    """Toggle debug mode on/off."""
+    enabled = req.get("enabled", False)
+    if 'debug' not in config:
+        config['debug'] = {}
+    config['debug']['enabled'] = enabled
+
+    # Save to config.json
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+
+    # Update all active orchestrators
+    for name, orchestrator in active_orchestrators.items():
+        orchestrator.set_debug_mode(enabled)
+
+    return {"debug": config['debug']}
 
 
 @app.websocket("/ws")

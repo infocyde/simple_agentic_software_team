@@ -93,7 +93,7 @@ class MemoryManager:
     def get_context_for_task(self, task: str, section: Optional[str] = None) -> str:
         """
         Get minimal, relevant context for a specific task.
-        This keeps token usage low by only providing what's needed.
+        Keeps token usage low — the agent can read SPEC.md/TODO.md itself if needed.
 
         Args:
             task: The task text
@@ -101,28 +101,20 @@ class MemoryManager:
         """
         context_parts = []
 
-        # Always include recent decisions (last 5)
+        # Include recent decisions (last 5) — small and high-value for architectural guidance
         decisions = self._get_recent_decisions(5)
         if decisions:
             context_parts.append("Recent decisions:\n" + "\n".join(decisions))
 
-        # Include spec summary if it exists
-        spec_path = os.path.join(self.project_path, "SPEC.md")
-        spec = self._read_file_cached(spec_path)
-        if spec is not None:
-            # Only include first ~500 chars of spec for context
-            if len(spec) > 500:
-                spec = spec[:500] + "\n... (spec truncated, read SPEC.md for full details)"
-            context_parts.append(f"Project spec (summary):\n{spec}")
-
-        # Include only relevant TODO items (current section, uncompleted only)
-        todo_path = os.path.join(self.project_path, "TODO.md")
-        todo_content = self._read_file_cached(todo_path)
-        if todo_content is not None:
-
-            filtered_todo = self._filter_todo_for_section(todo_content, section)
-            if filtered_todo:
-                context_parts.append(f"Related tasks in this section:\n{filtered_todo}")
+        # Include a few sibling tasks from the same section for awareness (max 3).
+        # Skip if no section specified — the agent doesn't need random unrelated tasks.
+        if section:
+            todo_path = os.path.join(self.project_path, "TODO.md")
+            todo_content = self._read_file_cached(todo_path)
+            if todo_content is not None:
+                filtered_todo = self._filter_todo_for_section(todo_content, section)
+                if filtered_todo:
+                    context_parts.append(f"Other tasks in this section:\n{filtered_todo}")
 
         return "\n\n---\n\n".join(context_parts) if context_parts else ""
 
@@ -133,10 +125,10 @@ class MemoryManager:
         """
         lines = todo_content.split('\n')
 
-        # If no section specified, just return uncompleted tasks (still saves tokens)
+        # If no section specified, return a few uncompleted tasks for minimal awareness
         if not section:
             uncompleted = [line for line in lines if '[ ]' in line]
-            return '\n'.join(uncompleted[:10])  # Max 10 tasks for general context
+            return '\n'.join(uncompleted[:3])
 
         # Normalize section name for matching
         section_normalized = section.lower().strip()

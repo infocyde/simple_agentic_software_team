@@ -41,7 +41,7 @@
     },
     "database_admin": {
       "enabled": true,
-      "model": "auto"
+      "model": "opus"
     },
     "security_reviewer": {
       "enabled": true,
@@ -63,13 +63,18 @@
     "dangerously_skip_permissions": true
   },
   "execution": {
-    "max_concurrent_agents": 4,
+    "max_concurrent_agents": 2,
     "task_timeout_seconds": 600,
-    "simple_task_timeout_seconds": 180,
-    "max_task_retries": 3,
+    "simple_task_timeout_seconds": 600,
+    "max_task_retries": 2,
     "allow_cross_section_parallel": true,
     "enable_task_batching": true,
-    "task_batch_size": 4
+    "task_batch_size": 7,
+    "session_continuity": true
+  },
+  "debug": {
+    "enabled": true,
+    "stream_output": true
   },
   "server_port": 8080,
   "model_routing": {
