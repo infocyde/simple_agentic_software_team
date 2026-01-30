@@ -285,5 +285,5 @@ handleLaunchError(data) { }
 
 ## Notes
 
-- The current workflow uses statuses: WIP → Security Review → QA → UAT → Done.
+- The current workflow uses statuses: WIP → Testing → Security Review → QA → UAT → Done.
 - If a launch feature is added, consider whether launching is allowed before UAT approval.

@@ -36,12 +36,15 @@ config_path = os.path.join(BASE_DIR, "config.json")
 with open(config_path, 'r') as f:
     config = json.load(f)
 
+# Load server port from config
+server_port = config.get("server_port", 8080)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("Agentic Software Team starting up...")
-    print(f"Open http://localhost:8000 in your browser")
+    print(f"Open http://localhost:{server_port} in your browser")
     yield
     print("Shutting down...")
 
@@ -61,6 +64,7 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "web", "templates")
 class CreateProjectRequest(BaseModel):
     name: str
     description: Optional[str] = None
+    fast_project: bool = False
 
 
 class MessageRequest(BaseModel):
@@ -129,7 +133,23 @@ async def list_projects():
 @app.post("/api/projects")
 async def create_project(req: CreateProjectRequest):
     """Create a new project."""
-    result = project_manager.create_project(req.name, quality_gates=config.get("quality_gates"))
+    default_strategy = config.get("defaults", {}).get("testing_strategy", "critical_paths")
+    quality_gates = config.get("quality_gates")
+    testing_strategy = default_strategy
+
+    if req.fast_project:
+        quality_gates = {
+            "run_security_review": False,
+            "run_qa_review": False,
+            "run_tests": False
+        }
+        testing_strategy = "smoke"
+
+    result = project_manager.create_project(
+        req.name,
+        quality_gates=quality_gates,
+        testing_strategy=testing_strategy
+    )
     return result
 
 
@@ -321,18 +341,27 @@ async def start_uat(name: str):
             "reason": reason
         })
 
+    async def uat_update_callback():
+        try:
+            await start_work(name)
+        except HTTPException:
+            pass
+        except Exception:
+            pass
+
     # Create conversation manager
     conversation = ConversationManager(
         project_path=project_path,
         message_callback=message_callback,
         activity_callback=create_activity_callback(name),
-        status_callback=status_callback
+        status_callback=status_callback,
+        uat_update_callback=uat_update_callback
     )
 
     active_conversations[name] = conversation
 
     # Get number of questions from config
-    num_questions = config.get("uat_questions", 10)
+    num_questions = config.get("uat_questions", 100)
 
     # Start UAT conversation in background
     asyncio.create_task(conversation.start_uat_conversation(num_questions))
@@ -354,10 +383,29 @@ async def complete_uat(name: str):
     if not hasattr(conversation, 'uat_mode') or not conversation.uat_mode:
         raise HTTPException(status_code=400, detail="Not in UAT mode")
 
-    # Signal to complete UAT
-    conversation.trigger_uat_completion()
+    # Signal to mark UAT as done (approved)
+    conversation.trigger_uat_done()
 
     return {"status": "triggered", "message": "Completing UAT..."}
+
+
+@app.post("/api/projects/{name}/update-reqs")
+async def update_reqs(name: str):
+    """Apply UAT feedback updates and resume work."""
+    if name not in active_conversations:
+        raise HTTPException(status_code=404, detail="No active UAT conversation for project")
+
+    conversation = active_conversations[name]
+
+    if not conversation.is_active:
+        raise HTTPException(status_code=400, detail="UAT conversation is not active")
+
+    if not hasattr(conversation, 'uat_mode') or not conversation.uat_mode:
+        raise HTTPException(status_code=400, detail="Not in UAT mode")
+
+    conversation.trigger_uat_update()
+
+    return {"status": "triggered", "message": "Updating requirements..."}
 
 
 @app.post("/api/projects/{name}/start-work")
@@ -393,9 +441,35 @@ async def start_work(name: str):
     orchestrator = active_orchestrators[name]
 
     # Start work in background
-    asyncio.create_task(orchestrator.start_work())
+    work_task = asyncio.create_task(orchestrator.start_work())
+    orchestrator.work_task = work_task
 
     return {"status": "started", "message": "Work started"}
+
+
+@app.post("/api/projects/{name}/force-stop")
+async def force_stop(name: str):
+    """Force stop all current activity for the project."""
+    stopped = {"orchestrator": False, "conversation": False}
+
+    if name in active_orchestrators:
+        await active_orchestrators[name].force_stop()
+        stopped["orchestrator"] = True
+
+    if name in active_conversations:
+        active_conversations[name].stop()
+        stopped["conversation"] = True
+
+    if not stopped["orchestrator"] and not stopped["conversation"]:
+        raise HTTPException(status_code=404, detail="No active work or conversation for this project")
+
+    await broadcast_message({
+        "type": "work_stopped",
+        "project": name,
+        "details": stopped
+    })
+
+    return {"status": "stopped", "details": stopped}
 
 
 @app.post("/api/projects/{name}/pause")
@@ -600,4 +674,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=server_port)

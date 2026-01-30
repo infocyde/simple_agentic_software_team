@@ -37,6 +37,10 @@ End-to-end software development system with a bias toward speed over perfection.
 - Verifies requirements and critical flows
 - Can use Playwright MCP server (optional)
 
+### 7. Testing Agent
+- Creates/updates tests and runs them before security review
+- Focuses on critical paths and fast, minimal coverage
+
 ## Coordination Model
 **Hybrid approach:**
 - PM acts as central coordinator
@@ -67,9 +71,10 @@ End-to-end software development system with a bias toward speed over perfection.
 2. PM generates spec document (SPEC.md)
 3. PM creates todo list with checkboxes (TODO.md)
 4. Work begins with agents tackling tasks
-5. Security review runs after tasks complete
-6. QA review runs after security passes
-7. UAT starts with user approval in the UI
+5. Testing runs before security (when enabled and above smoke)
+6. Security review runs after tasks complete
+7. QA review runs after security passes
+8. UAT starts with user approval in the UI
 
 ### New Feature Request
 1. PM asks ~10 questions to understand the feature
@@ -77,7 +82,7 @@ End-to-end software development system with a bias toward speed over perfection.
 3. Treated as mini-project within existing codebase
 
 ### Workflow Statuses
-- **WIP** → **Security Review** → **QA** → **UAT** → **Done**
+- **WIP** → **Testing** → **Security Review** → **QA** → **UAT** → **Done**
 
 ## Testing Strategy
 - **Default:** Test critical paths

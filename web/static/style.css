@@ -134,6 +134,15 @@ header h1 {
     background: #444;
 }
 
+.btn-danger {
+    background: #c62828;
+    color: white;
+}
+
+.btn-danger:hover {
+    background: #e53935;
+}
+
 /* Project List */
 .project-list {
     list-style: none;
@@ -190,6 +199,11 @@ header h1 {
 
 .badge-security {
     background: #f44336;
+    color: white;
+}
+
+.badge-testing {
+    background: #03a9f4;
     color: white;
 }
 
@@ -319,6 +333,12 @@ header h1 {
     background: #f44336;
     border-color: #ff5252;
     box-shadow: 0 0 8px rgba(244, 67, 54, 0.6);
+}
+
+.status-step[data-status="testing"].active .step-dot {
+    background: #03a9f4;
+    border-color: #4fc3f7;
+    box-shadow: 0 0 8px rgba(3, 169, 244, 0.6);
 }
 
 .status-step[data-status="qa"].active .step-dot {
@@ -469,6 +489,10 @@ header h1 {
     border-left-color: #f44336;
 }
 
+.activity-item.testing_agent {
+    border-left-color: #03a9f4;
+}
+
 .activity-item.qa_tester {
     border-left-color: #9c27b0;
 }
@@ -609,7 +633,8 @@ header h1 {
 }
 
 .form-group input,
-.form-group textarea {
+.form-group textarea,
+.form-group select {
     width: 100%;
     padding: 10px;
     border: 1px solid #333;
@@ -620,9 +645,22 @@ header h1 {
 }
 
 .form-group input:focus,
-.form-group textarea:focus {
+.form-group textarea:focus,
+.form-group select:focus {
     outline: none;
     border-color: #0f4c75;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #bbb;
+    font-size: 0.9rem;
+}
+
+.checkbox-row input {
+    accent-color: #0f4c75;
 }
 
 .modal-actions {
@@ -729,6 +767,17 @@ header h1 {
 .chat-form {
     display: flex;
     gap: 10px;
+}
+
+.chat-helper {
+    margin-top: 8px;
+    color: #8aa2c4;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.chat-helper strong {
+    color: #cfe0f3;
 }
 
 .chat-form textarea {

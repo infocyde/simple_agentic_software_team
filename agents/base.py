@@ -64,7 +64,7 @@ class BaseAgent(ABC):
             self.activity_callback(activity)
         return activity
 
-    def _build_prompt(self, task: str, context: str = "") -> str:
+    def _build_prompt(self, task: str, context: str = "", is_simple: bool = False) -> str:
         """Build the full prompt for Claude CLI."""
         prompt_parts = []
 
@@ -95,6 +95,10 @@ class BaseAgent(ABC):
         prompt_parts.append("- If you need current documentation: first run `python utils/search_docs.py '<library> <topic>'` to find URLs, then use WebFetch to read them")
         prompt_parts.append("- When finished, provide a brief summary of what you accomplished")
         prompt_parts.append("- If you encounter issues you cannot resolve, explain what went wrong")
+
+        if is_simple:
+            prompt_parts.append("")
+            prompt_parts.append("NOTE: This is a straightforward task. Complete it quickly and move on -- do not over-engineer, explore unrelated code, or add unnecessary abstractions.")
 
         return "\n".join(prompt_parts)
 
@@ -173,8 +177,17 @@ class BaseAgent(ABC):
         # Determine which model to use
         model = self._get_model_for_task(task, config)
 
-        # Build the prompt
-        prompt = self._build_prompt(task, context)
+        # Apply complexity-based timeout: simple tasks get a shorter leash
+        complexity = self._classify_task_complexity(task)
+        if complexity == 'simple' and config:
+            simple_timeout = config.get('execution', {}).get('simple_task_timeout_seconds', 180)
+            effective_timeout = min(timeout, simple_timeout)
+        else:
+            effective_timeout = timeout
+        timeout = effective_timeout
+
+        # Build the prompt (with urgency hint for simple tasks)
+        prompt = self._build_prompt(task, context, is_simple=(complexity == 'simple'))
 
         try:
             # Write prompt to temp file to avoid shell escaping issues
@@ -263,6 +276,13 @@ class BaseAgent(ABC):
 
         try:
             stdout, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            raise
         finally:
             heartbeat_task.cancel()
             try:

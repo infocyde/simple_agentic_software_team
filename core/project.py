@@ -12,6 +12,7 @@ class ProjectStatus(Enum):
     """Project workflow status states."""
     INITIALIZED = "initialized"
     WIP = "wip"
+    TESTING = "testing"
     SECURITY_REVIEW = "security_review"
     QA = "qa"
     UAT = "uat"  # User Acceptance Testing - human review before Done
@@ -31,6 +32,7 @@ class ProjectStatus(Enum):
         return [
             cls.INITIALIZED,
             cls.WIP,
+            cls.TESTING,
             cls.SECURITY_REVIEW,
             cls.QA,
             cls.UAT,
@@ -55,7 +57,13 @@ class ProjectManager:
         self.projects_dir = os.path.join(base_path, "projects")
         os.makedirs(self.projects_dir, exist_ok=True)
 
-    def create_project(self, name: str, init_git: bool = True, quality_gates: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+    def create_project(
+        self,
+        name: str,
+        init_git: bool = True,
+        quality_gates: Optional[Dict[str, bool]] = None,
+        testing_strategy: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Create a new project directory with initial structure.
 
@@ -82,7 +90,12 @@ class ProjectManager:
         os.makedirs(os.path.join(project_path, "src"), exist_ok=True)
 
         # Create initial files
-        self._create_initial_files(project_path, name, quality_gates=quality_gates)
+        self._create_initial_files(
+            project_path,
+            name,
+            quality_gates=quality_gates,
+            testing_strategy=testing_strategy
+        )
 
         # Initialize git if requested
         if init_git:
@@ -95,7 +108,13 @@ class ProjectManager:
             "name": safe_name
         }
 
-    def _create_initial_files(self, project_path: str, display_name: str, quality_gates: Optional[Dict[str, bool]] = None):
+    def _create_initial_files(
+        self,
+        project_path: str,
+        display_name: str,
+        quality_gates: Optional[Dict[str, bool]] = None,
+        testing_strategy: Optional[str] = None
+    ):
         """Create initial project files."""
         # Create placeholder SPEC.md
         spec_content = f"""# {display_name}
@@ -149,6 +168,7 @@ This file tracks decisions, actions, and lessons learned.
             "security_review_passed": False,
             "qa_passed": False,
             "review_cycles": 0,
+            "testing_strategy": testing_strategy or "critical_paths",
             "quality_gates": quality_gates or {
                 "run_security_review": True,
                 "run_qa_review": True,
@@ -353,6 +373,7 @@ build/
                 "security_review_passed": False,
                 "qa_passed": False,
                 "review_cycles": 0,
+                "testing_strategy": "critical_paths",
                 "quality_gates": {
                     "run_security_review": True,
                     "run_qa_review": True,
@@ -401,6 +422,7 @@ build/
 
         # Track review cycles (when going back to WIP from review stages)
         if new_status == ProjectStatus.WIP and old_status in [
+            ProjectStatus.TESTING.value,
             ProjectStatus.SECURITY_REVIEW.value,
             ProjectStatus.QA.value
         ]:
@@ -443,6 +465,7 @@ build/
             "security_review_passed": False,
             "qa_passed": False,
             "review_cycles": 0,
+            "testing_strategy": "critical_paths",
             "quality_gates": {
                 "run_security_review": True,
                 "run_qa_review": True,
@@ -468,6 +491,11 @@ build/
             "run_tests": True
         })
 
+    def get_testing_strategy(self, name: str) -> str:
+        """Get per-project testing strategy."""
+        status = self.get_workflow_status(name)
+        return status.get("testing_strategy", "critical_paths")
+
     def set_quality_gates(self, name: str, gates: Dict[str, bool]) -> Dict[str, Any]:
         """Update per-project quality gates in STATUS.json."""
         project_path = os.path.join(self.projects_dir, name)
@@ -484,6 +512,12 @@ build/
             json.dump(current, f, indent=2)
 
         return {"status": "success", "quality_gates": current["quality_gates"]}
+
+    def _find_max_task_id(self, todo_content: str) -> int:
+        """Find the highest task ID in the TODO.md content."""
+        import re
+        ids = re.findall(r'- \[[ xX]\]\s*\{(\d+)\}', todo_content)
+        return max((int(i) for i in ids), default=0)
 
     def add_review_issues_to_todo(
         self,
@@ -511,6 +545,9 @@ build/
         with open(todo_path, 'r') as f:
             todo_content = f.read()
 
+        # Find the highest existing task ID so new issues get unique IDs
+        next_id = self._find_max_task_id(todo_content) + 1
+
         # Create new section for review issues
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         new_section = f"\n\n## {review_type} Issues ({timestamp})\n"
@@ -518,10 +555,11 @@ build/
         for issue in issues:
             title = issue.get("title", "Untitled Issue")
             description = issue.get("description", "")
-            new_section += f"- [ ] {title}"
+            new_section += f"- [ ] {{{next_id}}} {title}"
             if description:
                 new_section += f"\n  - {description}"
             new_section += "\n"
+            next_id += 1
 
         # Append to TODO.md
         with open(todo_path, 'a') as f:

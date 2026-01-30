@@ -16,8 +16,10 @@ class ProjectManagerAgent(BaseAgent):
 1. **Project Kickoff**: For new projects, ask 15-20 questions to understand requirements, then create:
    - SPEC.md: A clear specification document
    - TODO.md: A checkbox-style todo list with all tasks
+   - If the project involves Python, include an early TODO item to create a project-local `.venv` using `uv`, activate it, and install required libraries there. Ensure testing/runs use the project's `.venv`, not the agent's environment.
 
 2. **Feature Requests**: For new features on existing projects, ask ~10 questions, then update the spec and create feature todos.
+   - If the project involves Python, ensure the TODO includes (near the top) a step to create/activate the project's `.venv` with `uv` and install dependencies there, and that tests/run commands use that environment.
 
 3. **Coordination**: Dispatch tasks to the right team members:
    - Software Engineer: Core backend logic, APIs, business logic

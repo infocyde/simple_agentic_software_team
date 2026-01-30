@@ -47,6 +47,10 @@
       "enabled": true,
       "model": "opus"
     },
+    "testing_agent": {
+      "enabled": true,
+      "model": "auto"
+    },
     "qa_tester": {
       "enabled": true,
       "model": "auto"
@@ -54,18 +58,20 @@
   },
   "project_kickoff_questions": 18,
   "feature_kickoff_questions": 10,
-  "uat_questions": 10,
+  "uat_questions": 100,
   "cli": {
     "dangerously_skip_permissions": true
   },
   "execution": {
     "max_concurrent_agents": 4,
     "task_timeout_seconds": 600,
+    "simple_task_timeout_seconds": 180,
     "max_task_retries": 3,
     "allow_cross_section_parallel": true,
     "enable_task_batching": true,
-    "task_batch_size": 2
+    "task_batch_size": 4
   },
+  "server_port": 8080,
   "model_routing": {
     "enabled": true,
     "default": "opus",

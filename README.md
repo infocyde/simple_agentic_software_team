@@ -30,6 +30,7 @@ The result: better architecture, cleaner code, fewer blind spots.
 | **Software Engineer** | Backend development, APIs, business logic, core implementation |
 | **UI/UX Engineer** | Frontend, user interfaces, styling, user experience |
 | **Database Admin** | Schema design, queries, migrations, data layer optimization |
+| **Testing Agent** | Test creation and execution (before security review) |
 | **Security Reviewer** | Security audits, vulnerability detection, code review |
 | **QA Tester** | Automated QA passes (optionally via Playwright) |
 
@@ -39,7 +40,7 @@ The result: better architecture, cleaner code, fewer blind spots.
 - **Parallel execution** - Multiple agents work simultaneously when tasks allow (cross-section optional)
 - **Auto-retry with self-healing** - Failed tasks get retried with error context
 - **Section-based organization** - Tasks grouped logically (Setup, Backend, Frontend, etc.)
-- **Workflow statuses** - Project moves through WIP → Security Review → QA → UAT → Done
+- **Workflow statuses** - Project moves through WIP → Testing → Security Review → QA → UAT → Done
 - **Test creation/update** - For `critical_paths` and `full_tdd`, a minimal pytest suite is created and updated as code changes
 
 ### Token-Efficient Context
@@ -121,6 +122,7 @@ Open [http://localhost:8000](http://localhost:8000)
 
 1. Click **+ New** in the sidebar
 2. Name your project
+3. (Optional) Check **Fast Project** to skip Testing, Security, and QA by default
 3. Click **Start Kickoff**
 4. Describe what you want to build
 5. Answer the PM's questions (10-20 depending on complexity)
@@ -142,7 +144,7 @@ Open [http://localhost:8000](http://localhost:8000)
 - **Spec** - Living project specification
 - **TODO** - Task list with completion status
 - **Team Status** - Which agents are currently working
-- **Workflow Status** - WIP → Security Review → QA → UAT → Done
+- **Workflow Status** - WIP → Testing → Security Review → QA → UAT → Done
 
 ---
 
@@ -150,6 +152,7 @@ Open [http://localhost:8000](http://localhost:8000)
 
 - **WIP** - Agents are implementing tasks from TODO.md
 - **Security Review** - Security reviewer audits code (blocking issues reopen TODO)
+- **Testing** - Testing agent creates/updates tests and runs them (when enabled)
 - **QA** - QA tester verifies requirements and critical flows
 - **UAT** - User acceptance testing with you in the UI
 - **Done** - Approved in UAT
@@ -180,9 +183,11 @@ You describe project
        |
        +--> [Database Admin] ----- schema, queries
        |
+       +--> [Testing Agent] ----- builds/updates tests
+       |
        +--> [Security Reviewer] -- audits everything
        |
-       +--> [QA Tester] ---------- automated QA pass
+       +--> [QA Tester] ---------- requirements verification
        |
        v
   UAT with you → Done
@@ -191,7 +196,7 @@ You describe project
 Workflow summary:
 
 ```
-WIP → Security Review → QA → UAT → Done
+WIP → Testing → Security Review → QA → UAT → Done
 ```
 
 Each agent is a **fresh Claude Code CLI invocation** with:
@@ -243,7 +248,27 @@ Edit `config.json`:
 }
 ```
 
-Quality gates can be overridden per project in the UI (saved in `STATUS.json`).
+Quality gates can be overridden per project in the UI (saved in `STATUS.json`), along with a per‑project `testing_strategy` when Fast mode is enabled. Example:
+
+```json
+{
+  "current_status": "initialized",
+  "testing_strategy": "smoke",
+  "quality_gates": {
+    "run_security_review": false,
+    "run_qa_review": false,
+    "run_tests": false
+  }
+}
+```
+
+### Fast Project Mode
+
+Fast mode is a per‑project preset that:
+- Disables **Testing**, **Security Review**, and **QA Review** gates
+- Sets testing strategy to **smoke** (so if tests are re‑enabled later, only smoke tests run)
+
+You can enable this when creating a project via the **Fast Project** checkbox in the UI.
 
 ### QA + Playwright (Optional)
 
@@ -313,7 +338,7 @@ For programmatic access or building your own UI:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/projects` | GET | List all projects |
-| `/api/projects` | POST | Create new project |
+| `/api/projects` | POST | Create new project (accepts `fast_project: true` to enable Fast mode) |
 | `/api/projects/{name}` | GET | Get project details |
 | `/api/projects/{name}/kickoff` | POST | Start project kickoff |
 | `/api/projects/{name}/feature` | POST | Start feature request |

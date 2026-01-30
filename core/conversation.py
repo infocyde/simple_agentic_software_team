@@ -19,12 +19,14 @@ class ConversationManager:
         project_path: str,
         message_callback: Optional[Callable] = None,
         activity_callback: Optional[Callable] = None,
-        status_callback: Optional[Callable] = None
+        status_callback: Optional[Callable] = None,
+        uat_update_callback: Optional[Callable] = None
     ):
         self.project_path = project_path
         self.message_callback = message_callback  # Send messages to frontend
         self.activity_callback = activity_callback  # Log activity
         self.status_callback = status_callback  # Update project status
+        self.uat_update_callback = uat_update_callback  # Resume work after UAT updates
         self.conversation_history: List[Dict[str, str]] = []
         self.is_active = False
         self.pending_response = asyncio.Event()
@@ -33,6 +35,7 @@ class ConversationManager:
         self.ready_for_spec = False
         self.uat_mode = False
         self.uat_approved = False
+        self.uat_update_requested = False
 
     def log_activity(self, action: str, details: str = ""):
         """Log activity."""
@@ -401,13 +404,29 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
    - Technical decisions
    - Any constraints or requirements mentioned
 
-2. TODO.md - A task list with checkboxes for implementation:
+2. TODO.md - A task list with checkboxes and dependency tracking for implementation:
    - IMPORTANT: Be CONCISE. Each task triggers a separate API call (costs tokens and rate limits).
    - Aim for the MINIMUM number of tasks needed - group related work into single tasks.
    - Maximum 50 tasks, but strongly prefer fewer (10-30 is ideal for most projects).
    - Each task should represent a meaningful chunk of work, not tiny steps.
    - Use [ ] for uncompleted tasks
    - Group related tasks into sections with ## headers
+   - DEPENDENCY FORMAT: Every task MUST have a unique numeric ID in curly braces, and may optionally declare dependencies:
+     - `- [ ] {1} Initialize project structure`
+     - `- [ ] {2} Install dependencies [depends: 1]`
+     - `- [ ] {3} Create database schema [depends: 1]`
+     - `- [ ] {4} Build API endpoints [depends: 3]`
+     - `- [ ] {5} Build login form [depends: 3, 6]`
+   - IDs are simple incrementing integers starting at 1
+   - [depends: N, M] means this task is blocked until tasks N and M are complete
+   - Tasks with no [depends:] tag can run immediately
+   - Use dependencies to express real ordering constraints (e.g. schema before API, setup before implementation)
+   - Tasks in the same section that are independent of each other need NO depends tag — they will run in parallel
+   - PYTHON PROJECTS: If the project involves Python, the VERY FIRST task (ID {1}) in the TODO MUST be:
+     `- [ ] {1} Create project-local .venv with uv (run: uv venv .venv), activate it, and install all required dependencies into it (run: uv pip install <packages>)`
+     All subsequent tasks that run code, tests, or servers MUST depend on this task.
+     All agents will work inside the project directory, so they must use the project's .venv — NOT any system Python or external environment.
+     Playwright/QA testing should also run from within the project's .venv context.
 
 --- Conversation ---
 """
@@ -428,7 +447,7 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
         self.is_active = False
         self.pending_response.set()
 
-    async def start_uat_conversation(self, num_questions: int = 10):
+    async def start_uat_conversation(self, num_questions: int = 100):
         """
         Start a UAT (User Acceptance Testing) conversation.
         The PM will present what was built and gather user feedback.
@@ -467,7 +486,7 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
 
         system_context = f"""You are the Project Manager (PM) conducting User Acceptance Testing (UAT) with the human user.
 
-The project has completed development, security review, and QA testing. Now you need the user's final approval.
+The project has completed development, testing, security review, and QA testing. Now you need the user's final approval.
 
 PROJECT SPECIFICATION:
 {spec_content[:2000]}
@@ -528,7 +547,10 @@ Question #{self.question_count + 1}: Start by briefly summarizing what was built
 
                 # Check if user triggered finalization
                 if self.ready_for_spec:
-                    await self._finalize_uat_conversation()
+                    if self.uat_update_requested:
+                        await self._process_uat_feedback()
+                    else:
+                        await self._finalize_uat_conversation()
                     break
 
                 user_input = self.user_response
@@ -573,7 +595,7 @@ Question #{self.question_count + 1}: Start by briefly summarizing what was built
             if self.question_count >= max_questions and self.is_active:
                 await self.send_message(
                     "system",
-                    f"Reached {max_questions} questions. Click 'Complete UAT' to finalize.",
+                    f"Reached {max_questions} questions. Click 'Update Reqs' to apply changes or 'Done' to finalize.",
                     "info"
                 )
 
@@ -613,9 +635,11 @@ Question #{self.question_count + 1}: Start by briefly summarizing what was built
             # User approved - project is done
             await self.send_message(
                 "system",
-                "Project approved! Marking as complete.",
+                "Project approved! Generating runit.md and marking as complete.",
                 "info"
             )
+
+            await self._generate_runit_md()
 
             # Update status to DONE
             if self.status_callback:
@@ -644,6 +668,7 @@ Question #{self.question_count + 1}: Start by briefly summarizing what was built
 
     async def _process_uat_feedback(self):
         """Process UAT feedback and update TODO/SPEC."""
+        self.uat_update_requested = False
         # Build prompt to analyze the conversation
         analyze_prompt = f"""Based on the following UAT conversation, analyze the user's feedback and determine what changes are needed.
 
@@ -660,7 +685,8 @@ Based on the conversation above:
 
 1. If the user requested CHANGES or reported BUGS, create new tasks in TODO.md
    - Add a new section "## UAT Feedback (date)" with the issues
-   - Use [ ] checkbox format for each task
+   - Use [ ] checkbox format for each task with unique IDs continuing from the highest existing ID
+   - Format: `- [ ] {N} Task description` (and optionally `[depends: X]` if it depends on another new task)
    - Be specific about what needs to be done
 
 2. If the user mentioned items to DEFER to future iterations (and agreed to defer):
@@ -727,8 +753,59 @@ Make the updates now."""
 
         self.is_active = False
         self.uat_mode = False
+        if self.uat_update_callback:
+            await self.uat_update_callback()
 
     def trigger_uat_completion(self):
         """Signal that UAT should be finalized (user clicked Complete UAT)."""
         self.ready_for_spec = True
         self.pending_response.set()
+
+    def trigger_uat_update(self):
+        """Signal that UAT feedback should update requirements and resume work."""
+        self.uat_update_requested = True
+        self.ready_for_spec = True
+        self.pending_response.set()
+
+    def trigger_uat_done(self):
+        """Signal that UAT is approved and should be finalized."""
+        self.uat_approved = True
+        self.ready_for_spec = True
+        self.pending_response.set()
+
+    async def _generate_runit_md(self):
+        """Generate run instructions in runit.md."""
+        prompt = """Create a file named runit.md in this project with clear instructions on how to build and run this project.
+
+Include:
+1. Local development setup
+2. Build steps (if applicable)
+3. Production run/deploy steps (if applicable)
+
+If details are unknown, note reasonable assumptions and how to verify. Keep it concise.
+
+Write the runit.md file now.
+"""
+        cmd = [
+            "claude",
+            "--dangerously-skip-permissions",
+            "--model", "claude-opus-4-20250514",
+            prompt
+        ]
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=self.project_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+            output = stdout.decode('utf-8', errors='replace')
+            self.log_activity("runit.md generated", output[:200] if output else "Complete")
+        except asyncio.TimeoutError:
+            self.log_activity("runit.md generation timeout")
+            await self.send_message("system", "runit.md generation timed out.", "error")
+        except Exception as e:
+            self.log_activity("runit.md generation error", str(e))
+            await self.send_message("system", f"Error generating runit.md: {str(e)}", "error")

@@ -84,6 +84,10 @@
                                 <span class="step-dot"></span>
                                 <span class="step-label">WIP</span>
                             </div>
+                            <div class="status-step" data-status="testing">
+                                <span class="step-dot"></span>
+                                <span class="step-label">Testing</span>
+                            </div>
                             <div class="status-step" data-status="security_review">
                                 <span class="step-dot"></span>
                                 <span class="step-label">Security</span>
@@ -106,6 +110,8 @@
                             <button id="featureBtn" class="btn btn-secondary">Add Feature</button>
                             <button id="startWorkBtn" class="btn btn-secondary">Start Work</button>
                             <button id="pauseBtn" class="btn btn-secondary" style="display: none;">Pause</button>
+                            <button id="forceStopBtn" class="btn btn-danger" style="display: none;">Force Stop</button>
+                            <button id="changeStatusBtn" class="btn btn-secondary">Change Status</button>
                             <button id="startUatBtn" class="btn btn-uat" style="display: none;">Start UAT</button>
                             <button id="completeUatBtn" class="btn btn-success" style="display: none;">Complete UAT</button>
                         </div>
@@ -143,14 +149,17 @@
                                     <p class="empty-message">Start a kickoff or add a feature to begin chatting with the team.</p>
                                 </div>
                                 <div class="chat-input-area">
-                                    <div id="chatStatus" class="chat-status"></div>
-                                    <form id="chatForm" class="chat-form">
-                                        <textarea id="chatInput" rows="2" placeholder="Type your response..." disabled></textarea>
-                                        <button type="submit" class="btn btn-primary" id="chatSendBtn" disabled>Send</button>
-                                        <button type="button" class="btn btn-secondary" id="writeSpecBtn" style="display: none;">Write Spec</button>
-                                    </form>
+                                <div id="chatStatus" class="chat-status"></div>
+                                <form id="chatForm" class="chat-form">
+                                    <textarea id="chatInput" rows="2" placeholder="Type your response..." disabled></textarea>
+                                    <button type="submit" class="btn btn-primary" id="chatSendBtn" disabled>Send</button>
+                                    <button type="button" class="btn btn-secondary" id="writeSpecBtn" style="display: none;">Write Spec</button>
+                                </form>
+                                <div id="uatHelper" class="chat-helper" style="display: none;">
+                                    <span><strong>Update Reqs</strong> updates SPEC/TODO and resumes work. <strong>Done</strong> generates runit.md and marks the project Done.</span>
                                 </div>
                             </div>
+                        </div>
                         </div>
 
                         <div id="activityTab" class="tab-pane active">
@@ -197,6 +206,11 @@
                         <span class="agent-name">Security Reviewer</span>
                         <span class="agent-status idle">Idle</span>
                     </div>
+                    <div class="agent-item" data-agent="testing_agent">
+                        <span class="agent-icon">🧪</span>
+                        <span class="agent-name">Testing Agent</span>
+                        <span class="agent-status idle">Idle</span>
+                    </div>
                     <div class="agent-item" data-agent="qa_tester">
                         <span class="agent-icon">🧪</span>
                         <span class="agent-name">QA Tester</span>
@@ -215,6 +229,12 @@
                 <div class="form-group">
                     <label for="projectName">Project Name</label>
                     <input type="text" id="projectName" required placeholder="my-awesome-project">
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-row">
+                        <input type="checkbox" id="fastProject">
+                        <span>Fast Project (skip testing, security, and QA by default)</span>
+                    </label>
                 </div>
                 <div class="modal-actions">
                     <button type="button" class="btn btn-secondary" id="cancelNewProject">Cancel</button>
@@ -242,6 +262,28 @@
             <div class="modal-actions">
                 <button type="button" class="btn btn-primary" id="dismissError">Dismiss</button>
             </div>
+        </div>
+
+        <div id="changeStatusModal" class="modal" style="display: none;">
+            <h3>Change Project Status</h3>
+            <form id="changeStatusForm">
+                <div class="form-group">
+                    <label for="projectStatusSelect">New Status</label>
+                    <select id="projectStatusSelect" required>
+                        <option value="initialized">Initialized</option>
+                        <option value="wip">Work In Progress</option>
+                        <option value="testing">Testing</option>
+                        <option value="security_review">Security Review</option>
+                        <option value="qa">QA Testing</option>
+                        <option value="uat">User Acceptance Testing</option>
+                        <option value="done">Done</option>
+                    </select>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" id="cancelChangeStatus">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="confirmChangeStatus">Change Status</button>
+                </div>
+            </form>
         </div>
     </div>
 

@@ -58,6 +58,7 @@ class AgenticTeamApp {
                 this.setWaitingForInput(false);
                 this.conversationActive = false;
                 document.getElementById('writeSpecBtn').style.display = 'none';
+                this.updateWorkButtons();
                 this.loadProjectData(); // Refresh spec and todo
                 break;
 
@@ -83,6 +84,19 @@ class AgenticTeamApp {
                 this.addActivityItem({
                     agent: 'system',
                     action: data.message || 'Work paused - ready to resume',
+                    timestamp: new Date().toISOString()
+                });
+                break;
+
+            case 'work_stopped':
+                this.workInProgress = false;
+                this.conversationActive = false;
+                this.uatActive = false;
+                this.clearActiveAgents();
+                this.updateWorkButtons();
+                this.addActivityItem({
+                    agent: 'system',
+                    action: data.message || 'Work force-stopped',
                     timestamp: new Date().toISOString()
                 });
                 break;
@@ -187,12 +201,16 @@ class AgenticTeamApp {
         document.getElementById('featureBtn').addEventListener('click', () => this.showMessageModal('feature'));
         document.getElementById('startWorkBtn').addEventListener('click', () => this.startWork());
         document.getElementById('pauseBtn').addEventListener('click', () => this.pauseWork());
+        document.getElementById('forceStopBtn').addEventListener('click', () => this.forceStopWork());
+        document.getElementById('changeStatusBtn').addEventListener('click', () => this.showChangeStatusModal());
         document.getElementById('writeSpecBtn').addEventListener('click', () => this.writeSpec());
         document.getElementById('startUatBtn').addEventListener('click', () => this.startUat());
         document.getElementById('completeUatBtn').addEventListener('click', () => this.completeUat());
         document.getElementById('cancelMessage').addEventListener('click', () => this.hideModals());
         document.getElementById('messageForm').addEventListener('submit', (e) => this.startConversation(e));
         document.getElementById('saveGatesBtn').addEventListener('click', () => this.saveQualityGates());
+        document.getElementById('cancelChangeStatus').addEventListener('click', () => this.hideModals());
+        document.getElementById('changeStatusForm').addEventListener('submit', (e) => this.changeProjectStatus(e));
 
         // Chat form
         document.getElementById('chatForm').addEventListener('submit', (e) => this.sendChatMessage(e));
@@ -237,6 +255,7 @@ class AgenticTeamApp {
         this.clearChat();
         this.conversationActive = false;
         this.setWaitingForInput(false);
+        this.updateWorkButtons();
 
         // Load project data
         await this.loadProjectData();
@@ -305,23 +324,25 @@ class AgenticTeamApp {
     updateStatusDisplay(status) {
         // Update status badge
         const statusValue = document.getElementById('projectStatusValue');
-        if (statusValue) {
-            const statusLabels = {
-                'initialized': 'Initialized',
-                'wip': 'Work In Progress',
-                'security_review': 'Security Review',
-                'qa': 'QA Testing',
-                'uat': 'User Acceptance Testing',
-                'done': 'Done'
-            };
-            const badgeClasses = {
-                'initialized': 'badge-new',
-                'wip': 'badge-wip',
-                'security_review': 'badge-security',
-                'qa': 'badge-qa',
-                'uat': 'badge-uat',
-                'done': 'badge-done'
-            };
+            if (statusValue) {
+                const statusLabels = {
+                    'initialized': 'Initialized',
+                    'wip': 'Work In Progress',
+                    'testing': 'Testing',
+                    'security_review': 'Security Review',
+                    'qa': 'QA Testing',
+                    'uat': 'User Acceptance Testing',
+                    'done': 'Done'
+                };
+                const badgeClasses = {
+                    'initialized': 'badge-new',
+                    'wip': 'badge-wip',
+                    'testing': 'badge-testing',
+                    'security_review': 'badge-security',
+                    'qa': 'badge-qa',
+                    'uat': 'badge-uat',
+                    'done': 'badge-done'
+                };
 
             statusValue.textContent = statusLabels[status] || status;
             statusValue.className = `status-value badge ${badgeClasses[status] || 'badge-new'}`;
@@ -335,7 +356,7 @@ class AgenticTeamApp {
     }
 
     updateStatusTimeline(currentStatus) {
-        const statusOrder = ['initialized', 'wip', 'security_review', 'qa', 'uat', 'done'];
+        const statusOrder = ['initialized', 'wip', 'testing', 'security_review', 'qa', 'uat', 'done'];
         const currentIndex = statusOrder.indexOf(currentStatus);
 
         document.querySelectorAll('.status-step').forEach(step => {
@@ -359,6 +380,7 @@ class AgenticTeamApp {
         const badges = {
             'initialized': '<span class="badge badge-new">New</span>',
             'wip': '<span class="badge badge-wip">WIP</span>',
+            'testing': '<span class="badge badge-testing">Testing</span>',
             'security_review': '<span class="badge badge-security">Security</span>',
             'qa': '<span class="badge badge-qa">QA</span>',
             'uat': '<span class="badge badge-uat">UAT</span>',
@@ -378,6 +400,7 @@ class AgenticTeamApp {
             startUatBtn.style.display = this.uatActive ? 'none' : 'inline-block';
             completeUatBtn.style.display = this.uatActive ? 'inline-block' : 'none';
             startWorkBtn.style.display = 'none';
+            completeUatBtn.textContent = 'Done';
         } else {
             startUatBtn.style.display = 'none';
             completeUatBtn.style.display = 'none';
@@ -404,9 +427,12 @@ class AgenticTeamApp {
         this.uatActive = false;
         this.conversationActive = false;
         this.setWaitingForInput(false);
+        this.updateWorkButtons();
 
         // Update buttons
         document.getElementById('completeUatBtn').style.display = 'none';
+        document.getElementById('completeUatBtn').textContent = 'Done';
+        document.getElementById('uatHelper').style.display = 'none';
 
         if (data.approved) {
             this.updateStatusDisplay('done');
@@ -429,6 +455,8 @@ class AgenticTeamApp {
 
         this.uatActive = true;
         this.conversationActive = true;
+        this.updateWorkButtons();
+        document.getElementById('uatHelper').style.display = 'block';
 
         // Switch to chat tab
         this.clearChat();
@@ -436,7 +464,9 @@ class AgenticTeamApp {
 
         // Update buttons
         document.getElementById('startUatBtn').style.display = 'none';
-        document.getElementById('completeUatBtn').style.display = 'inline-block';
+        const doneBtn = document.getElementById('completeUatBtn');
+        doneBtn.style.display = 'inline-block';
+        doneBtn.textContent = 'Done';
 
         // Show thinking indicator
         this.showThinkingIndicator('project_manager');
@@ -450,11 +480,13 @@ class AgenticTeamApp {
             if (data.status === 'error') {
                 this.addChatMessage('system', `Error: ${data.message}`, 'system');
                 this.uatActive = false;
+                this.updateWorkButtons();
             }
         } catch (error) {
             console.error('Error starting UAT:', error);
             this.addChatMessage('system', 'Error starting UAT conversation', 'system');
             this.uatActive = false;
+            this.updateWorkButtons();
         }
     }
 
@@ -478,7 +510,7 @@ class AgenticTeamApp {
             this.addChatMessage('system', 'Error completing UAT', 'system');
         } finally {
             document.getElementById('completeUatBtn').disabled = false;
-            document.getElementById('completeUatBtn').textContent = 'Complete UAT';
+            document.getElementById('completeUatBtn').textContent = 'Done';
         }
     }
 
@@ -544,6 +576,7 @@ class AgenticTeamApp {
             'ui_ux_engineer': 'UI/UX Engineer',
             'database_admin': 'Database Admin',
             'security_reviewer': 'Security Reviewer',
+            'testing_agent': 'Testing Agent',
             'qa_tester': 'QA Tester',
             'orchestrator': 'Orchestrator',
             'system': 'System'
@@ -636,6 +669,7 @@ class AgenticTeamApp {
         // Show Write Spec button when conversation is active and waiting for input
         if (waiting && this.conversationActive) {
             writeSpecBtn.style.display = 'inline-block';
+            writeSpecBtn.textContent = this.uatActive ? 'Update Reqs' : 'Write Spec';
         } else {
             writeSpecBtn.style.display = 'none';
         }
@@ -684,6 +718,7 @@ class AgenticTeamApp {
     showNewProjectModal() {
         document.getElementById('modalOverlay').style.display = 'flex';
         document.getElementById('newProjectModal').style.display = 'block';
+        document.getElementById('fastProject').checked = false;
         document.getElementById('projectName').focus();
     }
 
@@ -703,11 +738,35 @@ class AgenticTeamApp {
         document.getElementById('messageInput').focus();
     }
 
+    showChangeStatusModal() {
+        if (!this.currentProject) return;
+        const select = document.getElementById('projectStatusSelect');
+        if (select) {
+            const current = document.getElementById('projectStatusValue');
+            const statusLabels = {
+                'Initialized': 'initialized',
+                'Work In Progress': 'wip',
+                'Testing': 'testing',
+                'Security Review': 'security_review',
+                'QA Testing': 'qa',
+                'User Acceptance Testing': 'uat',
+                'Done': 'done'
+            };
+            if (current) {
+                select.value = statusLabels[current.textContent] || select.value;
+            }
+        }
+        document.getElementById('modalOverlay').style.display = 'flex';
+        document.getElementById('changeStatusModal').style.display = 'block';
+        document.getElementById('projectStatusSelect').focus();
+    }
+
     hideModals() {
         document.getElementById('modalOverlay').style.display = 'none';
         document.getElementById('newProjectModal').style.display = 'none';
         document.getElementById('messageModal').style.display = 'none';
         document.getElementById('errorModal').style.display = 'none';
+        document.getElementById('changeStatusModal').style.display = 'none';
     }
 
     showErrorModal(message) {
@@ -764,13 +823,14 @@ class AgenticTeamApp {
     async createProject(e) {
         e.preventDefault();
         const name = document.getElementById('projectName').value.trim();
+        const fastProject = document.getElementById('fastProject').checked;
         if (!name) return;
 
         try {
             const res = await fetch('/api/projects', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name })
+                body: JSON.stringify({ name, fast_project: fastProject })
             });
 
             const data = await res.json();
@@ -812,6 +872,7 @@ class AgenticTeamApp {
         this.clearChat();
         this.switchTab('chat');
         this.conversationActive = true;
+        this.updateWorkButtons();
 
         // Add initial user message
         this.addChatMessage('You', message, 'user');
@@ -842,12 +903,13 @@ class AgenticTeamApp {
 
         // Disable the button and show thinking
         document.getElementById('writeSpecBtn').disabled = true;
-        document.getElementById('writeSpecBtn').textContent = 'Creating...';
+        document.getElementById('writeSpecBtn').textContent = this.uatActive ? 'Updating...' : 'Creating...';
         this.setWaitingForInput(false);
         this.showThinkingIndicator('project_manager');
 
         try {
-            const res = await fetch(`/api/projects/${this.currentProject}/write-spec`, {
+            const endpoint = this.uatActive ? 'update-reqs' : 'write-spec';
+            const res = await fetch(`/api/projects/${this.currentProject}/${endpoint}`, {
                 method: 'POST'
             });
 
@@ -860,7 +922,7 @@ class AgenticTeamApp {
             this.addChatMessage('system', 'Error creating spec. Please try again.', 'system');
         } finally {
             document.getElementById('writeSpecBtn').disabled = false;
-            document.getElementById('writeSpecBtn').textContent = 'Write Spec';
+            document.getElementById('writeSpecBtn').textContent = this.uatActive ? 'Update Reqs' : 'Write Spec';
         }
     }
 
@@ -911,9 +973,93 @@ class AgenticTeamApp {
         }
     }
 
+    async forceStopWork() {
+        if (!this.currentProject) return;
+
+        const confirmStop = confirm('Force stop will cancel all current activity for this project. Continue?');
+        if (!confirmStop) return;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/force-stop`, {
+                method: 'POST'
+            });
+
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.detail || 'Force stop failed');
+            }
+
+            this.workInProgress = false;
+            this.uatActive = false;
+            this.conversationActive = false;
+            this.setWaitingForInput(false);
+            this.updateWorkButtons();
+
+            this.addActivityItem({
+                agent: 'system',
+                action: 'Force stop requested',
+                details: 'All activity cancelled',
+                timestamp: new Date().toISOString()
+            });
+        } catch (error) {
+            console.error('Error force stopping work:', error);
+            alert('Error force stopping work');
+        }
+    }
+
+    async changeProjectStatus(e) {
+        e.preventDefault();
+        if (!this.currentProject) return;
+
+        const select = document.getElementById('projectStatusSelect');
+        const confirmBtn = document.getElementById('confirmChangeStatus');
+        const newStatus = select.value;
+
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Changing...';
+
+        try {
+            const stopRes = await fetch(`/api/projects/${this.currentProject}/force-stop`, {
+                method: 'POST'
+            });
+
+            if (!stopRes.ok && stopRes.status !== 404) {
+                const data = await stopRes.json();
+                throw new Error(data.detail || 'Force stop failed');
+            }
+
+            this.workInProgress = false;
+            this.uatActive = false;
+            this.conversationActive = false;
+            this.setWaitingForInput(false);
+            this.updateWorkButtons();
+
+            const statusRes = await fetch(`/api/projects/${this.currentProject}/status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: newStatus, reason: 'Manual status update' })
+            });
+            const data = await statusRes.json();
+
+            if (!statusRes.ok) {
+                throw new Error(data.detail || data.message || 'Status update failed');
+            }
+
+            this.updateStatusDisplay(data.new_status || newStatus);
+            this.hideModals();
+        } catch (error) {
+            console.error('Error changing status:', error);
+            alert(error.message || 'Error changing status');
+        } finally {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Change Status';
+        }
+    }
+
     updateWorkButtons() {
         const startBtn = document.getElementById('startWorkBtn');
         const pauseBtn = document.getElementById('pauseBtn');
+        const forceStopBtn = document.getElementById('forceStopBtn');
 
         if (this.workInProgress) {
             startBtn.style.display = 'none';
@@ -921,6 +1067,12 @@ class AgenticTeamApp {
         } else {
             startBtn.style.display = 'inline-block';
             pauseBtn.style.display = 'none';
+        }
+
+        if (this.workInProgress || this.conversationActive || this.uatActive) {
+            forceStopBtn.style.display = 'inline-block';
+        } else {
+            forceStopBtn.style.display = 'none';
         }
     }
 
