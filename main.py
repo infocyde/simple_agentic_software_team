@@ -18,6 +18,7 @@ from core.orchestrator import Orchestrator
 from core.project import ProjectManager, ProjectStatus
 from core.conversation import ConversationManager
 from core.playwright_utils import PlaywrightManager
+from core.project_launcher import ProjectLauncher
 
 # Load environment variables
 load_dotenv()
@@ -30,6 +31,7 @@ active_orchestrators: Dict[str, Orchestrator] = {}
 active_conversations: Dict[str, ConversationManager] = {}
 websocket_connections: List[WebSocket] = []
 project_manager = ProjectManager(BASE_DIR)
+project_launcher = ProjectLauncher()
 
 # Load config
 config_path = os.path.join(BASE_DIR, "config.json")
@@ -197,6 +199,55 @@ async def get_project_log(name: str):
     log_path = os.path.join(project_path, "log.md")
     if os.path.exists(log_path):
         with open(log_path, 'r', encoding='utf-8') as f:
+            return {"log": f.read()}
+    return {"log": ""}
+
+
+@app.get("/api/projects/{name}/runit")
+async def get_project_runit(name: str):
+    """Get run instructions (runit.md) for a project."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    runit_path = os.path.join(project_path, "runit.md")
+    if os.path.exists(runit_path):
+        with open(runit_path, 'r', encoding='utf-8') as f:
+            return {"runit": f.read()}
+    return {"runit": ""}
+
+
+@app.post("/api/projects/{name}/launch")
+async def launch_project(name: str):
+    """Launch a project for manual testing."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = project_launcher.launch_project(name, project_path)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("message", "Launch failed"))
+    return result
+
+
+@app.post("/api/projects/{name}/stop-launch")
+async def stop_project_launch(name: str):
+    """Stop a launched project."""
+    result = project_launcher.stop_project(name)
+    return result
+
+
+@app.get("/api/projects/{name}/launch-log")
+async def get_project_launch_log(name: str):
+    """Get launch log for a project."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    info = project_launcher.get_launch_info(name)
+    log_path = info.log_path if info else os.path.join(project_path, "launch.log")
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
             return {"log": f.read()}
     return {"log": ""}
 

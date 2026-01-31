@@ -10,6 +10,7 @@ class AgenticTeamApp {
         this.workInProgress = false;
         this.activeAgents = new Set();
         this.uatActive = false;
+        this.launchWindows = {};
 
         this.init();
     }
@@ -234,6 +235,15 @@ class AgenticTeamApp {
         document.getElementById('writeSpecBtn').addEventListener('click', () => this.writeSpec());
         document.getElementById('startUatBtn').addEventListener('click', () => this.startUat());
         document.getElementById('completeUatBtn').addEventListener('click', () => this.completeUat());
+        document.getElementById('launchProjectBtn').addEventListener('click', () => this.launchProject());
+        document.getElementById('stopLaunchBtn').addEventListener('click', () => this.stopLaunch());
+        document.getElementById('launchLogBtn').addEventListener('click', () => this.showLaunchLogModal());
+        document.getElementById('openRunitBtn').addEventListener('click', () => this.showRunitModal());
+        document.getElementById('closeRunitModal').addEventListener('click', () => {
+            this.hideModals();
+            this.clearRunitWarning();
+        });
+        document.getElementById('closeLaunchLogModal').addEventListener('click', () => this.hideModals());
         document.getElementById('cancelMessage').addEventListener('click', () => this.hideModals());
         document.getElementById('messageForm').addEventListener('submit', (e) => this.startConversation(e));
         document.getElementById('saveGatesBtn').addEventListener('click', () => this.saveQualityGates());
@@ -276,6 +286,7 @@ class AgenticTeamApp {
             item.classList.toggle('active', item.dataset.name === name);
         });
 
+        this.clearRunitWarning();
         document.getElementById('noProjectSelected').style.display = 'none';
         document.getElementById('projectView').style.display = 'block';
         document.getElementById('projectTitle').textContent = name;
@@ -382,6 +393,11 @@ class AgenticTeamApp {
 
         // Show/hide UAT buttons based on status
         this.updateUatButtons(status);
+
+        // Show QA prep hint
+        this.updateQaRunHint(status);
+
+        this.clearRunitWarning();
     }
 
     updateStatusTimeline(currentStatus) {
@@ -434,6 +450,12 @@ class AgenticTeamApp {
             startUatBtn.style.display = 'none';
             completeUatBtn.style.display = 'none';
         }
+    }
+
+    updateQaRunHint(status) {
+        const qaHint = document.getElementById('qaRunHint');
+        if (!qaHint) return;
+        qaHint.style.display = (status === 'qa' || status === 'uat') ? 'block' : 'none';
     }
 
     handleUatReady(data) {
@@ -631,6 +653,8 @@ class AgenticTeamApp {
         });
         document.getElementById(`${tabName}Tab`).style.display = 'block';
 
+        this.clearRunitWarning();
+
         // Load log content when switching to log tab
         if (tabName === 'log') {
             this.loadLog();
@@ -801,6 +825,8 @@ class AgenticTeamApp {
         document.getElementById('messageModal').style.display = 'none';
         document.getElementById('errorModal').style.display = 'none';
         document.getElementById('changeStatusModal').style.display = 'none';
+        const runitModal = document.getElementById('runitModal');
+        if (runitModal) runitModal.style.display = 'none';
     }
 
     showErrorModal(message) {
@@ -985,6 +1011,104 @@ class AgenticTeamApp {
             this.workInProgress = false;
             this.updateWorkButtons();
         }
+    }
+
+    async launchProject() {
+        if (!this.currentProject) return;
+
+        const runitWarning = document.getElementById('runitWarning');
+        if (runitWarning) runitWarning.style.display = 'none';
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/launch`, {
+                method: 'POST'
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                const message = err.detail || 'Launch failed';
+                if (message.toLowerCase().includes('runit.md')) {
+                    if (runitWarning) {
+                        runitWarning.textContent = 'Launch needs a clear run command in runit.md. Please update it and try again.';
+                        runitWarning.style.display = 'block';
+                    }
+                    await this.showRunitModal();
+                }
+                throw new Error(message);
+            }
+
+            const data = await res.json();
+            const statusText = data.status === 'running' ? 'Project already running' : 'Launch started';
+            const details = data.command ? `Command: ${data.command}` : '';
+
+            if (runitWarning) runitWarning.style.display = 'none';
+
+            this.addActivityItem({
+                agent: 'system',
+                action: statusText,
+                details: details,
+                timestamp: new Date().toISOString()
+            });
+
+            if (data.launch_url) {
+                const opened = window.open(data.launch_url, '_blank', 'noopener');
+                if (opened) {
+                    this.launchWindows[this.currentProject] = opened;
+                }
+            }
+        } catch (error) {
+            console.error('Error launching project:', error);
+            alert(error.message || 'Error launching project');
+        }
+    }
+
+    async stopLaunch() {
+        if (!this.currentProject) return;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/stop-launch`, {
+                method: 'POST'
+            });
+            const data = await res.json();
+
+            this.addActivityItem({
+                agent: 'system',
+                action: data.message || 'Launch stopped',
+                timestamp: new Date().toISOString()
+            });
+
+            const opened = this.launchWindows[this.currentProject];
+            if (opened && !opened.closed) {
+                opened.close();
+            }
+            delete this.launchWindows[this.currentProject];
+        } catch (error) {
+            console.error('Error stopping launch:', error);
+            alert(error.message || 'Error stopping launch');
+        }
+    }
+
+    async showLaunchLogModal() {
+        if (!this.currentProject) return;
+
+        const overlay = document.getElementById('modalOverlay');
+        const modal = document.getElementById('launchLogModal');
+        const content = document.getElementById('launchLogContent');
+        if (!overlay || !modal || !content) return;
+
+        content.textContent = 'Loading launch log...';
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/launch-log`);
+            const data = await res.json();
+            content.textContent = data.log || 'No launch log found yet.';
+        } catch (error) {
+            console.error('Error loading launch log:', error);
+            content.textContent = 'Error loading launch log.';
+        }
+
+        overlay.style.display = 'flex';
+        modal.style.display = 'block';
     }
 
     async pauseWork() {
@@ -1337,6 +1461,37 @@ class AgenticTeamApp {
         } catch (error) {
             console.error('Error loading log:', error);
             document.getElementById('logContent').textContent = 'Error loading log.';
+        }
+    }
+
+    async showRunitModal() {
+        if (!this.currentProject) return;
+
+        const overlay = document.getElementById('modalOverlay');
+        const modal = document.getElementById('runitModal');
+        const content = document.getElementById('runitContent');
+        if (!overlay || !modal || !content) return;
+
+        content.textContent = 'Loading runit.md...';
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/runit`);
+            const data = await res.json();
+            content.textContent = data.runit || 'No runit.md found yet.';
+        } catch (error) {
+            console.error('Error loading runit.md:', error);
+            content.textContent = 'Error loading runit.md.';
+        }
+
+        overlay.style.display = 'flex';
+        modal.style.display = 'block';
+        this.clearRunitWarning();
+    }
+
+    clearRunitWarning() {
+        const runitWarning = document.getElementById('runitWarning');
+        if (runitWarning) {
+            runitWarning.style.display = 'none';
         }
     }
 

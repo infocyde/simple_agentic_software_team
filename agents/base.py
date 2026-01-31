@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
 from utils.cli_logger import log_cli_call
+from utils.secrets import load_agent_secrets
 
 
 class BaseAgent(ABC):
@@ -512,6 +513,7 @@ class BaseAgent(ABC):
 
         # Set up environment with UTF-8 encoding for Windows compatibility
         env = os.environ.copy()
+        env.update(load_agent_secrets(self.name))
         env['PYTHONIOENCODING'] = 'utf-8'
         env['PYTHONUTF8'] = '1'
 

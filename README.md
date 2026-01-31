@@ -45,7 +45,7 @@ The result: better architecture, cleaner code, fewer blind spots.
 - **Auto-retry with self-healing** - Failed tasks get retried with error context
 - **Section-based organization** - Tasks grouped logically (Setup, Backend, Frontend, etc.)
 - **Workflow statuses** - Project moves through WIP → Testing → Security Review → QA → UAT → Done
-- **Test creation/update** - For `critical_paths` and `full_tdd`, a minimal pytest suite is created and updated as code changes
+- **Test creation/update** - For `critical_paths` and `full_tdd`, a minimal language-appropriate test suite is created and updated (pytest only for Python)
 
 ### Token-Efficient Context
 
@@ -81,6 +81,7 @@ No stale knowledge. No guessing at APIs. Current docs for whatever stack you cho
 - **Secret scanning** - Catches hardcoded secrets in code
 - **Security-first reviews** - Security issues block progress; style issues don't
 - **QA review** - Automated QA pass after implementation (can be disabled)
+- **UAT Launch Controls** - One-click launch/stop for your built project using runit.md, plus a launch log viewer
 
 ---
 
@@ -136,6 +137,8 @@ Open [http://localhost:8080](http://localhost:8080) (default port, configurable 
 6. Click **Write Spec** when ready
 7. Click **Start Work** - agents take over
 8. When prompted, click **Start UAT** to review and approve
+9. Use **Launch** in UAT to run the project locally (uses `runit.md`)
+10. Click **Stop** to terminate the launched process
 
 ### Add Features Later
 
@@ -163,6 +166,24 @@ Open [http://localhost:8080](http://localhost:8080) (default port, configurable 
 - **QA** - QA tester verifies requirements and critical flows
 - **UAT** - User acceptance testing with you in the UI
 - **Done** - Approved in UAT
+
+### UAT Launch & Logs
+
+During UAT, use the **Launch** button to run the project in its own process. The system reads `runit.md` to find a run command and starts the app from the project directory. If `runit.md` does not include a clear run command block, launch will fail and the UI will prompt you to update it.
+
+The **Stop** button terminates the launched process. If the project opened a browser tab via Launch, the UI will attempt to close it (browsers only allow closing tabs opened by the same UI session).
+
+Use **Launch Log** to view the `launch.log` output captured from the launched process.
+
+Example `runit.md` snippet:
+
+```bash
+# Install (if needed)
+pip install -r requirements.txt
+
+# Run (required for Launch)
+python main.py
+```
 
 ---
 
@@ -323,6 +344,16 @@ Edit `config.json`:
 }
 ```
 
+### Secrets (Local Only)
+
+Use the `secrets/` directory as the canonical location for any project-related secrets, including API keys needed by libraries or MCP servers. Store per-agent secrets in `secrets/<agent>.env` (for example, `secrets/software_engineer.env`). These files are ignored by git. In production, do **not** push or ship secrets from this repo—use your platform's secret manager or environment configuration, and be cautious with any values placed in these files. If your environment requires secrets to live outside the repo, move them and set the corresponding environment variables before running (or use a symlink). Some setups may require relocating these files for compliance.
+
+Common examples (not exhaustive):
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `MCP_SERVER_API_KEY`
+- `DATABASE_URL`
+
 Quality gates can be overridden per project in the UI (saved in `STATUS.json`), along with a per‑project `testing_strategy` when Fast mode is enabled. Example:
 
 ```json
@@ -365,8 +396,8 @@ If you don't want browser-based QA, set `playwright.enabled` to `false`. The QA 
 |----------|-------------|
 | `minimal` | No tests run |
 | `smoke_tests` | Run existing tests only |
-| `critical_paths` | Auto-create/update minimal pytest suite + run tests |
-| `full_tdd` | Require tests; auto-create/update and fail if none exist |
+| `critical_paths` | Auto-create/update minimal language-appropriate tests + run tests |
+| `full_tdd` | Require tests; auto-create/update and fail if none exist (pytest only for Python) |
 
 ### Review Policies
 
@@ -401,6 +432,7 @@ projects/my-app/
   SUMMARY.md        # Completion summary (after done)
   log.md            # Full Claude CLI call log (prompts, results, context usage %)
   error_log.md      # Error and timeout details
+  launch.log        # Output from the UAT Launch process
   QA/               # QA notes and screenshots
   src/              # Your actual code
   .git/             # Version controlled from the start
@@ -436,6 +468,9 @@ For programmatic access or building your own UI:
 | `/api/projects/{name}/qa-screenshots` | GET | QA screenshots list |
 | `/api/projects/{name}/qa-screenshots/{filename}` | GET | QA screenshot file |
 | `/api/projects/{name}/task-decision` | POST | Resolve task failure escalation |
+| `/api/projects/{name}/launch` | POST | Launch project using runit.md |
+| `/api/projects/{name}/stop-launch` | POST | Stop launched project |
+| `/api/projects/{name}/launch-log` | GET | Read launch.log |
 | `/api/playwright/status` | GET | Playwright availability |
 | `/ws` | WebSocket | Real-time activity stream |
 

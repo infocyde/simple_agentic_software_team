@@ -7,6 +7,7 @@ import json
 from typing import Dict, Any, Optional, Callable, List
 from datetime import datetime
 from utils.cli_logger import log_cli_call
+from utils.secrets import load_agent_secrets
 
 
 class ConversationManager:
@@ -247,9 +248,7 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
             ]
 
             # Set up environment with UTF-8 encoding for Windows
-            env = os.environ.copy()
-            env['PYTHONIOENCODING'] = 'utf-8'
-            env['PYTHONUTF8'] = '1'
+            env = self._build_pm_env()
 
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -325,6 +324,14 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
             text = text.replace(char, replacement)
         return text.encode('ascii', errors='replace').decode('ascii')
 
+    def _build_pm_env(self) -> Dict[str, str]:
+        """Build environment variables for PM subprocess calls."""
+        env = os.environ.copy()
+        env.update(load_agent_secrets("project_manager"))
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONUTF8'] = '1'
+        return env
+
     def _clean_response(self, response: str) -> str:
         """Clean up Claude's response to remove any simulated user responses."""
         # Common patterns where Claude might simulate user responses
@@ -392,7 +399,8 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
                 cwd=self.project_path,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=self._build_pm_env()
             )
 
             stdout, stderr = await asyncio.wait_for(
@@ -771,7 +779,8 @@ Make the updates now."""
                 cwd=self.project_path,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=self._build_pm_env()
             )
 
             stdout, stderr = await asyncio.wait_for(
@@ -843,6 +852,11 @@ Make the updates now."""
 
     async def _generate_runit_md(self):
         """Generate run instructions in runit.md."""
+        runit_path = os.path.join(self.project_path, "runit.md")
+        if os.path.exists(runit_path):
+            self.log_activity("runit.md already exists", "Skipping generation")
+            return
+
         prompt = """Create a file named runit.md in this project with clear instructions on how to build and run this project.
 
 Include:
@@ -867,7 +881,8 @@ Write the runit.md file now.
                 cwd=self.project_path,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=self._build_pm_env()
             )
             stdout, stderr = await asyncio.wait_for(process.communicate(input=prompt.encode('utf-8')), timeout=180)
             output = stdout.decode('utf-8', errors='replace')

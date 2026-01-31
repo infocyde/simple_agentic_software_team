@@ -212,3 +212,4 @@ projects/
 
 # Local environment overrides
 .env.local
+secrets/

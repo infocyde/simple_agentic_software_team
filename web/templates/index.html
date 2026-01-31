@@ -114,6 +114,17 @@
                             <button id="changeStatusBtn" class="btn btn-secondary">Change Status</button>
                             <button id="startUatBtn" class="btn btn-uat" style="display: none;">Start UAT</button>
                             <button id="completeUatBtn" class="btn btn-success" style="display: none;">Complete UAT</button>
+                            <button id="launchProjectBtn" class="btn btn-launch">Launch</button>
+                            <button id="stopLaunchBtn" class="btn btn-danger">Stop</button>
+                            <button id="launchLogBtn" class="btn btn-secondary btn-small">Launch Log</button>
+                        </div>
+                        <div id="runitWarning" class="runit-warning" style="display: none;">
+                            Launch needs a clear run command in <code>runit.md</code>. Please update it and try again.
+                        </div>
+                        <div id="qaRunHint" class="qa-run-hint" style="display: none;">
+                            <div class="qa-run-title">QA Prep: Test It Yourself First</div>
+                            <div class="qa-run-text">Use the run instructions in <code>runit.md</code> to test the project before QA review chat.</div>
+                            <button id="openRunitBtn" class="btn btn-secondary btn-small">Open runit.md</button>
                         </div>
                     </div>
 
@@ -295,9 +306,24 @@
                 </div>
                 <div class="modal-actions">
                     <button type="button" class="btn btn-secondary" id="cancelChangeStatus">Cancel</button>
-                    <button type="submit" class="btn btn-primary" id="confirmChangeStatus">Change Status</button>
-                </div>
-            </form>
+                <button type="submit" class="btn btn-primary" id="confirmChangeStatus">Change Status</button>
+            </div>
+        </form>
+    </div>
+
+        <div id="runitModal" class="modal" style="display: none;">
+            <h3>Run Instructions (runit.md)</h3>
+            <pre id="runitContent" class="content-display"></pre>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="closeRunitModal">Close</button>
+            </div>
+        </div>
+        <div id="launchLogModal" class="modal" style="display: none;">
+            <h3>Launch Log</h3>
+            <pre id="launchLogContent" class="content-display"></pre>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="closeLaunchLogModal">Close</button>
+            </div>
         </div>
     </div>
 

@@ -1114,7 +1114,7 @@ If the project involves Python, ensure the TODO list includes, near the top, a t
                                 if test_result.get("status") in {"failed", "error", "timeout"}:
                                     testing_issues.append({
                                         "title": "[BLOCKING] Smoke tests failed",
-                                        "description": (test_result.get("summary", "") or "pytest failed").strip()[:400]
+                                        "description": (test_result.get("summary", "") or "tests failed").strip()[:400]
                                     })
 
                         if testing_issues:
@@ -1607,7 +1607,8 @@ Report any blocking issues that must be fixed before proceeding."""
             if not self._has_code_changes_since_last_review():
                 return {"status": "skipped", "summary": "Testing skipped (no code changes since last QA)."}
 
-        tests_found = self._detect_pytests()
+        languages = self._detect_project_languages()
+        tests_found = self._detect_tests_for_languages(languages)
         if not tests_found:
             summary = f"No tests found (strategy: {strategy})."
             if strategy == "full_tdd":
@@ -1627,12 +1628,23 @@ Report any blocking issues that must be fixed before proceeding."""
             })
             return {"status": "skipped", "summary": summary}
 
-        cmd = ["pytest", "-q"]
+        test_cmd = self._get_test_command(languages)
+        if not test_cmd:
+            summary = "Tests found but no supported test runner detected."
+            self._log_activity({
+                "timestamp": datetime.now().isoformat(),
+                "agent": "orchestrator",
+                "action": "Tests error",
+                "details": summary
+            })
+            return {"status": "error", "summary": summary}
+
+        cmd = test_cmd["cmd"]
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
             "agent": "orchestrator",
             "action": "Running tests",
-            "details": "pytest -q"
+            "details": test_cmd["label"]
         })
 
         process = None
@@ -1653,8 +1665,8 @@ Report any blocking issues that must be fixed before proceeding."""
                 combined = f"{out}\n{err}".strip()
 
             if process.returncode == 0:
-                return {"status": "passed", "summary": combined or "pytest passed."}
-            return {"status": "failed", "summary": combined or "pytest failed."}
+                return {"status": "passed", "summary": combined or f"{test_cmd['label']} passed."}
+            return {"status": "failed", "summary": combined or f"{test_cmd['label']} failed."}
         except asyncio.CancelledError:
             if process:
                 try:
@@ -1664,20 +1676,169 @@ Report any blocking issues that must be fixed before proceeding."""
                 await process.wait()
             raise
         except asyncio.TimeoutError:
-            return {"status": "timeout", "summary": "pytest timed out."}
+            return {"status": "timeout", "summary": f"{test_cmd['label']} timed out."}
         except FileNotFoundError:
-            return {"status": "error", "summary": "pytest not found. Install it to run tests."}
+            return {"status": "error", "summary": f"{test_cmd['label']} not found. Install it to run tests."}
         except Exception as e:
             return {"status": "error", "summary": f"Test runner error: {str(e)[:200]}"}
 
     def _detect_pytests(self) -> bool:
         """Detect if pytest-style tests exist in the project."""
+        languages = self._detect_project_languages()
+        if "python" not in languages:
+            return False
         for root, dirs, files in os.walk(self.project_path):
             dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build"}]
             for name in files:
                 if name.startswith("test_") and name.endswith(".py"):
                     return True
         return False
+
+    def _detect_project_languages(self) -> Set[str]:
+        """Detect project languages based on common config files and file extensions."""
+        root = self.project_path
+        languages: Set[str] = set()
+
+        if os.path.exists(os.path.join(root, "pyproject.toml")) or os.path.exists(os.path.join(root, "requirements.txt")):
+            languages.add("python")
+        if os.path.exists(os.path.join(root, "setup.py")) or os.path.exists(os.path.join(root, "setup.cfg")):
+            languages.add("python")
+        if os.path.exists(os.path.join(root, "package.json")):
+            languages.add("node")
+        if os.path.exists(os.path.join(root, "go.mod")):
+            languages.add("go")
+        if os.path.exists(os.path.join(root, "Cargo.toml")):
+            languages.add("rust")
+        if os.path.exists(os.path.join(root, "pom.xml")) or os.path.exists(os.path.join(root, "build.gradle")) or os.path.exists(os.path.join(root, "build.gradle.kts")):
+            languages.add("java")
+        if any(name.endswith(".csproj") or name.endswith(".sln") for name in os.listdir(root)):
+            languages.add("dotnet")
+        if os.path.exists(os.path.join(root, "Gemfile")):
+            languages.add("ruby")
+        if os.path.exists(os.path.join(root, "composer.json")):
+            languages.add("php")
+
+        if not languages:
+            languages = self._detect_languages_by_extension()
+
+        return languages
+
+    def _detect_languages_by_extension(self) -> Set[str]:
+        languages: Set[str] = set()
+        ext_map = {
+            ".py": "python",
+            ".js": "node",
+            ".jsx": "node",
+            ".ts": "node",
+            ".tsx": "node",
+            ".go": "go",
+            ".rs": "rust",
+            ".java": "java",
+            ".cs": "dotnet",
+            ".rb": "ruby",
+            ".php": "php",
+        }
+        exclude_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build", "QA"}
+        roots = [self.project_path, os.path.join(self.project_path, "src")]
+        for base in roots:
+            if not os.path.exists(base):
+                continue
+            for root, dirs, files in os.walk(base):
+                dirs[:] = [d for d in dirs if d not in exclude_dirs]
+                for name in files:
+                    ext = os.path.splitext(name)[1].lower()
+                    lang = ext_map.get(ext)
+                    if lang:
+                        languages.add(lang)
+                if languages:
+                    return languages
+        return languages
+
+    def _detect_tests_for_languages(self, languages: Set[str]) -> bool:
+        if "python" in languages and self._detect_pytests():
+            return True
+        if "node" in languages and self._detect_node_tests():
+            return True
+        if "go" in languages and self._detect_go_tests():
+            return True
+        if "rust" in languages and self._detect_rust_tests():
+            return True
+        if "java" in languages and self._detect_java_tests():
+            return True
+        if "dotnet" in languages and self._detect_dotnet_tests():
+            return True
+        return False
+
+    def _detect_node_tests(self) -> bool:
+        if not os.path.exists(os.path.join(self.project_path, "package.json")):
+            return False
+        test_dirs = {"test", "tests", "__tests__"}
+        for d in test_dirs:
+            if os.path.exists(os.path.join(self.project_path, d)):
+                return True
+        patterns = (".test.js", ".spec.js", ".test.jsx", ".spec.jsx", ".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx")
+        exclude_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build", "QA"}
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for name in files:
+                lower = name.lower()
+                if lower.endswith(patterns):
+                    return True
+        return False
+
+    def _detect_go_tests(self) -> bool:
+        if not os.path.exists(os.path.join(self.project_path, "go.mod")):
+            return False
+        exclude_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build", "QA"}
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for name in files:
+                if name.endswith("_test.go"):
+                    return True
+        return False
+
+    def _detect_rust_tests(self) -> bool:
+        if not os.path.exists(os.path.join(self.project_path, "Cargo.toml")):
+            return False
+        if os.path.exists(os.path.join(self.project_path, "tests")):
+            return True
+        return False
+
+    def _detect_java_tests(self) -> bool:
+        if not (os.path.exists(os.path.join(self.project_path, "pom.xml")) or os.path.exists(os.path.join(self.project_path, "build.gradle")) or os.path.exists(os.path.join(self.project_path, "build.gradle.kts"))):
+            return False
+        if os.path.exists(os.path.join(self.project_path, "src", "test")):
+            return True
+        return False
+
+    def _detect_dotnet_tests(self) -> bool:
+        try:
+            for name in os.listdir(self.project_path):
+                lower = name.lower()
+                if lower.endswith(".csproj") and ("test" in lower or "tests" in lower):
+                    return True
+        except OSError:
+            return False
+        if os.path.exists(os.path.join(self.project_path, "tests")):
+            return True
+        return False
+
+    def _get_test_command(self, languages: Set[str]) -> Optional[Dict[str, Any]]:
+        if "python" in languages and self._detect_pytests():
+            return {"cmd": ["pytest", "-q"], "label": "pytest -q"}
+        if "node" in languages and self._detect_node_tests():
+            return {"cmd": ["npm", "test"], "label": "npm test"}
+        if "go" in languages and self._detect_go_tests():
+            return {"cmd": ["go", "test", "./..."], "label": "go test ./..."}
+        if "rust" in languages and self._detect_rust_tests():
+            return {"cmd": ["cargo", "test"], "label": "cargo test"}
+        if "dotnet" in languages and self._detect_dotnet_tests():
+            return {"cmd": ["dotnet", "test"], "label": "dotnet test"}
+        if "java" in languages and self._detect_java_tests():
+            if os.path.exists(os.path.join(self.project_path, "mvnw")) or os.path.exists(os.path.join(self.project_path, "mvnw.cmd")):
+                return {"cmd": ["mvnw", "test"], "label": "mvnw test"}
+            return {"cmd": ["mvn", "test"], "label": "mvn test"}
+        return None
 
     def _quality_marker_path(self) -> str:
         return os.path.join(self.project_path, ".quality_gate.json")
@@ -1728,7 +1889,8 @@ Report any blocking issues that must be fixed before proceeding."""
 
     async def _ensure_tests_exist(self, allow_update: bool = False) -> Dict[str, Any]:
         """Ask the Testing Agent to create or update minimal tests as needed."""
-        tests_exist = self._detect_pytests()
+        languages = self._detect_project_languages()
+        tests_exist = self._detect_tests_for_languages(languages)
 
         if tests_exist and not allow_update:
             return {"status": "skipped", "result": "Tests already exist; update not required."}
@@ -1736,10 +1898,17 @@ Report any blocking issues that must be fixed before proceeding."""
         try:
             await self._notify_agent_start("testing_agent")
 
-            prompt = """Create or update a minimal pytest test suite for this project.
+            languages = sorted(languages)
+            language_hint = ", ".join(languages) if languages else "unknown"
+
+            prompt = f"""Create or update a minimal, language-appropriate test suite for this project.
+
+Detected project languages: {language_hint}.
 
 Requirements:
-- Place tests under a `tests/` directory
+- Use pytest only if this is a Python project
+- Otherwise, use the project's existing test framework or the language's standard test tooling
+- Place tests under a `tests/` directory (or the language's standard test location)
 - Ensure tests align with the current code after recent changes
 - At least one test should assert basic project sanity (e.g., config loads, app imports)
 - Keep tests fast and focused on critical paths
@@ -1792,7 +1961,7 @@ Requirements:
         if test_result.get("status") in {"failed", "error", "timeout"}:
             issues.append({
                 "title": "[BLOCKING] Automated tests failed",
-                "description": (test_result.get("summary", "") or "pytest failed").strip()[:400]
+                "description": (test_result.get("summary", "") or "tests failed").strip()[:400]
             })
 
         result_summary = f"TEST PREP: {prep_result.get('status')} | TEST RUN: {test_result.get('status')} - {test_result.get('summary', '')[:400]}"
@@ -1809,6 +1978,8 @@ Requirements:
             return {"status": "skipped", "result": "QA review skipped (quality gate disabled)."}
         if not self._has_code_changes_since_last_review():
             return {"status": "skipped", "result": "QA review skipped (no code changes since last QA)."}
+
+        await self._ensure_runit_md()
 
         self._log_activity({
             "timestamp": datetime.now().isoformat(),
@@ -1942,6 +2113,46 @@ If issues are found, report them in the format above so they can be added to TOD
             issues.append(current_issue)
 
         return issues
+
+    async def _ensure_runit_md(self) -> Dict[str, Any]:
+        """Ensure runit.md exists before QA/UAT to help manual testing."""
+        runit_path = os.path.join(self.project_path, "runit.md")
+        if os.path.exists(runit_path):
+            return {"status": "skipped", "result": "runit.md already exists."}
+
+        self._log_activity({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "orchestrator",
+            "action": "Generating runit.md",
+            "details": "Preparing run instructions before QA"
+        })
+
+        prompt = """Create a file named runit.md in this project with clear instructions on how to build and run this project.
+
+Include:
+1. Local development setup
+2. Build steps (if applicable)
+3. Production run/deploy steps (if applicable)
+
+If details are unknown, note reasonable assumptions and how to verify. Keep it concise.
+
+Write the runit.md file now.
+"""
+        try:
+            await self._notify_agent_start("project_manager")
+            result = await self.agents["project_manager"].process_task(
+                task=prompt,
+                project_path=self.project_path,
+                context=self.memory.get_project_summary(),
+                orchestrator=self,
+                timeout=min(self.task_timeout, 180),
+                config=self.config
+            )
+            return result
+        except Exception:
+            return {"status": "error", "result": "Failed to generate runit.md."}
+        finally:
+            await self._notify_agent_complete("project_manager")
 
     async def _handle_review_issues(
         self,
