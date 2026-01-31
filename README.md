@@ -6,6 +6,8 @@
 
 > **Experimental Software** — This project is under active development and provided as-is, with no warranties or guarantees. Use at your own risk. By design, this tool spawns multiple concurrent Claude Code CLI processes. While this does not violate Anthropic's Terms of Service, setting `max_concurrent_agents` to an excessively high value may trigger rate limits or draw scrutiny from Anthropic. Use reasonable concurrency settings and monitor your usage accordingly. Additionally, execution speed is still being optimized — expect slower-than-ideal runtimes as we continue to improve performance.
 
+![Dashboard](web/static/dashboard.png)
+
 Describe what you want. Answer a few questions. Watch a team of specialized AI agents architect, implement, and deliver your project.
 
 No API keys. No complex setup. Just your existing **Claude Code CLI subscription**.
