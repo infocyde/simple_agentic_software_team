@@ -12,24 +12,40 @@ async def log_cli_call(
     prompt: str,
     model: str,
     status: str,
-    result_summary: str = ""
+    result_summary: str = "",
+    resuming: bool = False,
+    session_chars_used: int = 0,
+    context_window_max: int = 0
 ):
-    """Append a CLI call entry to {project_path}/log.md."""
+    """Append a CLI call entry to {project_path}/log.md.
+
+    Logs the full prompt and full result so the log accurately reflects
+    what was sent to and received from Claude.
+    """
     log_path = os.path.join(project_path, "log.md")
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    prompt_preview = prompt.replace('\n', '\n> ')
-    result_preview = result_summary if result_summary else "(no output)"
+    prompt_quoted = prompt.replace('\n', '\n> ')
+    result_text = result_summary if result_summary else "(no output)"
+
+    # Session info line
+    session_info = ""
+    if resuming:
+        session_info = "- **Session:** resumed (agent definition skipped)\n"
+    if context_window_max > 0:
+        usage_pct = (session_chars_used / context_window_max * 100) if context_window_max else 0
+        session_info += f"- **Context usage:** ~{session_chars_used:,} / {context_window_max:,} chars ({usage_pct:.0f}%)\n"
 
     entry = f"""
 ## {timestamp}
 - **Agent:** {agent_name} ({agent_role})
 - **Model:** {model or 'default'}
 - **Status:** {status}
-- **Prompt (preview):**
-> {prompt_preview}
+{session_info}- **Prompt:**
+> {prompt_quoted}
 
-- **Result (preview):** {result_preview}
+- **Result:**
+{result_text}
 ---
 """
     try:

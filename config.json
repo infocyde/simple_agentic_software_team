@@ -69,7 +69,7 @@
     "max_task_retries": 2,
     "allow_cross_section_parallel": true,
     "enable_task_batching": true,
-    "task_batch_size": 7,
+    "task_batch_size": 3,
     "session_continuity": true
   },
   "debug": {
@@ -77,6 +77,14 @@
     "stream_output": true
   },
   "server_port": 8080,
+  "context_window": {
+    "max_chars": 800000,
+    "threshold_percent": 65,
+    "max_tasks_per_session": 5
+  },
+  "memory": {
+    "max_action_log_entries": 10
+  },
   "model_routing": {
     "enabled": true,
     "default": "opus",

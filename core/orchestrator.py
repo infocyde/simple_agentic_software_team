@@ -59,7 +59,7 @@ class Orchestrator:
         self.human_input_callback = human_input_callback
         self.message_callback = message_callback  # For sending work status updates
         self.activity_log: List[Dict[str, Any]] = []
-        self.memory = MemoryManager(project_path)
+        self.memory = MemoryManager(project_path, config=config)
 
         # Project status management
         base_path = os.path.dirname(project_path)
@@ -1329,26 +1329,53 @@ If the project involves Python, ensure the TODO list includes, near the top, a t
         return {"status": "complete", "result": "Work session ended"}
 
     def _determine_agent_for_task(self, task_text: str) -> str:
-        """Determine which agent should handle a task based on keywords."""
+        """Determine which agent should handle a task based on keywords.
+
+        Order matters: check specific/narrow keywords before broad ones.
+        Broad words like 'test', 'model', 'auth' match too many tasks if
+        checked first, so they are handled with care or left to the default.
+        """
         task_lower = task_text.lower()
 
-        # QA/Testing related
-        if any(kw in task_lower for kw in ['test', 'qa', 'verify', 'bug', 'fix bug', 'regression', 'validation']):
+        # --- Narrow / high-confidence matches first ---
+
+        # QA tester: only explicit QA, verification, and regression work
+        if any(kw in task_lower for kw in ['qa review', 'qa test', 'regression test', 'verify requirements', 'acceptance test', 'end-to-end test', 'e2e test']):
             return "qa_tester"
 
-        # UI/UX related
-        if any(kw in task_lower for kw in ['ui', 'ux', 'design', 'css', 'style', 'layout', 'interface', 'frontend', 'html', 'template']):
-            return "ui_ux_engineer"
-
-        # Database related
-        if any(kw in task_lower for kw in ['database', 'db', 'schema', 'sql', 'migration', 'model', 'table', 'query']):
-            return "database_admin"
-
-        # Security related
-        if any(kw in task_lower for kw in ['security', 'auth', 'authentication', 'authorization', 'encrypt', 'password', 'token']):
+        # Security reviewer: only audits/reviews, not implementation of auth features
+        if any(kw in task_lower for kw in ['security audit', 'security review', 'vulnerability', 'penetration test', 'security scan']):
             return "security_reviewer"
 
-        # Default to software engineer
+        # Testing agent: writing or running tests (unit, integration, etc.)
+        if any(kw in task_lower for kw in ['write test', 'create test', 'add test', 'update test', 'unit test', 'integration test', 'test suite', 'test case', 'run test', 'fix test']):
+            return "testing_agent"
+
+        # --- Medium-specificity matches ---
+
+        # UI/UX related
+        if any(kw in task_lower for kw in ['css', 'style', 'layout', 'frontend', 'html', 'template', 'responsive', 'navbar', 'sidebar', 'modal', 'theme']):
+            return "ui_ux_engineer"
+
+        # Database related (use specific DB terms, not broad words like 'model')
+        if any(kw in task_lower for kw in ['database', 'schema', 'sql', 'migration', 'table', 'query', 'index', 'foreign key', 'seed data']):
+            return "database_admin"
+
+        # --- Broad fallback matches ---
+
+        # 'test' alone (not caught above) -> testing_agent, not qa_tester
+        if 'test' in task_lower:
+            return "testing_agent"
+
+        # UI keywords that are broader
+        if any(kw in task_lower for kw in ['ui', 'ux', 'design', 'interface']):
+            return "ui_ux_engineer"
+
+        # DB broader match
+        if any(kw in task_lower for kw in ['db', 'model']):
+            return "database_admin"
+
+        # Default to software engineer — handles auth, implementation, and everything else
         return "software_engineer"
 
     async def _mark_task_complete(self, task_text: str):

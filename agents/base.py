@@ -3,6 +3,7 @@
 import os
 import sys
 import json
+import time
 import asyncio
 import signal
 import subprocess
@@ -57,6 +58,14 @@ class BaseAgent(ABC):
         # Session continuity: reuse Claude CLI sessions across tasks
         self._session_id: Optional[str] = None
         self._session_continuity: bool = False  # Enabled via config
+        # Context window tracking: estimated chars used in current session
+        self._session_chars_used: int = 0
+        self._context_window_max_chars: int = 0  # 0 = disabled, set from config
+        self._context_window_threshold: float = 0.65  # Start new session at this %
+        self._session_task_count: int = 0  # Tasks completed in current session
+        self._max_tasks_per_session: int = 5  # Reset session after N tasks (from config)
+        # Stale-file detection: track when this agent last finished a task
+        self._last_task_finished: float = 0.0  # epoch timestamp
 
     def log_activity(self, action: str, details: str = ""):
         """Log agent activity for the activity feed."""
@@ -74,18 +83,81 @@ class BaseAgent(ABC):
     def reset_session(self):
         """Clear the stored session ID, forcing a cold start on the next task."""
         self._session_id = None
+        self._session_chars_used = 0
+        self._session_task_count = 0
+        self._last_task_finished = 0.0
 
-    def _build_prompt(self, task: str, context: str = "", is_simple: bool = False) -> str:
-        """Build the full prompt for Claude CLI."""
+    def _scan_changed_files(self, project_path: str) -> List[str]:
+        """Return project files modified since this agent's last task finished.
+
+        Used on resumed sessions to warn the agent that its cached knowledge
+        of certain files may be stale (another agent modified them).
+        """
+        if self._last_task_finished == 0.0:
+            return []
+
+        code_extensions = {
+            '.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css',
+            '.sql', '.sh', '.yml', '.yaml', '.json', '.md',
+        }
+        exclude_dirs = {
+            '.git', 'node_modules', '__pycache__', '.venv', 'venv',
+            'dist', 'build', 'QA',
+        }
+
+        changed: List[str] = []
+        for root, dirs, files in os.walk(project_path):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in code_extensions:
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    if os.path.getmtime(fpath) > self._last_task_finished:
+                        changed.append(os.path.relpath(fpath, project_path))
+                except OSError:
+                    continue
+        return changed
+
+    def _build_prompt(
+        self, task: str, context: str = "",
+        is_simple: bool = False, resuming: bool = False,
+        changed_files: Optional[List[str]] = None
+    ) -> str:
+        """Build the full prompt for Claude CLI.
+
+        When resuming a session, Claude already knows the agent role and system
+        prompt from the previous turn, so we skip them to save tokens.
+        ``changed_files`` lists project files modified by other agents since
+        this agent's last turn — prompts the agent to re-read before editing.
+        """
         prompt_parts = []
 
-        # Add role context
-        prompt_parts.append(f"You are the {self.role} on a software development team.")
-        prompt_parts.append("")
+        if not resuming:
+            # Add role context (only on first message in session)
+            prompt_parts.append(f"You are the {self.role} on a software development team.")
+            prompt_parts.append("")
 
-        # Add system prompt (agent personality/instructions)
-        if self.system_prompt:
-            prompt_parts.append(self.system_prompt)
+            # Add system prompt (agent personality/instructions)
+            if self.system_prompt:
+                prompt_parts.append(self.system_prompt)
+                prompt_parts.append("")
+
+        # Warn about files changed by other agents since our last turn
+        if resuming and changed_files:
+            prompt_parts.append("## Files Changed Since Your Last Task")
+            prompt_parts.append(
+                "The following files were modified by other agents since you "
+                "last ran. If you need to read or edit any of them, re-read "
+                "them first — your cached knowledge of their contents is stale."
+            )
+            # Cap the list to avoid bloating the prompt on large changesets
+            display_files = changed_files[:30]
+            for f in display_files:
+                prompt_parts.append(f"- {f}")
+            if len(changed_files) > 30:
+                prompt_parts.append(f"- ... and {len(changed_files) - 30} more files")
             prompt_parts.append("")
 
         # Add project context if provided
@@ -100,9 +172,17 @@ class BaseAgent(ABC):
         prompt_parts.append("")
 
         # Add minimal instructions — only items that change Claude's default behavior
-        prompt_parts.append("## Instructions")
-        prompt_parts.append("- Do NOT open or use Playwright browser tools unless your task specifically requires browser-based testing or visual verification. Writing code, running scripts, and running tests do NOT require a browser.")
-        prompt_parts.append("- For external library docs: run `python utils/search_docs.py '<library> <topic>'` then use WebFetch to read results.")
+        if not resuming:
+            prompt_parts.append("## Instructions")
+
+            # Browser guardrail: agent-specific
+            # qa_tester gets its own Playwright instructions via system prompt — skip here
+            # software_engineer and ui_ux_engineer may need browser for verification
+            # all others should never touch the browser
+            if self.name in ('database_admin', 'testing_agent', 'security_reviewer', 'project_manager'):
+                prompt_parts.append("- You do not have browser tools. Do not attempt to open or use a browser.")
+            elif self.name in ('software_engineer', 'ui_ux_engineer'):
+                prompt_parts.append("- Never open a browser unless your task explicitly says to test in a browser.")
 
         if is_simple:
             prompt_parts.append("- Be concise. Do not over-engineer, explore unrelated code, or add unnecessary abstractions.")
@@ -184,6 +264,36 @@ class BaseAgent(ABC):
         # Enable session continuity if configured
         if config:
             self._session_continuity = config.get('execution', {}).get('session_continuity', False)
+            # Context window settings
+            cw_config = config.get('context_window', {})
+            self._context_window_max_chars = cw_config.get('max_chars', 0)
+            self._context_window_threshold = cw_config.get('threshold_percent', 65) / 100.0
+            self._max_tasks_per_session = cw_config.get('max_tasks_per_session', 5)
+
+        # Check if current session should be reset (context % OR task count)
+        if self._session_continuity and self._session_id:
+            reset_reason = None
+
+            # Check task count limit
+            if self._max_tasks_per_session > 0 and self._session_task_count >= self._max_tasks_per_session:
+                reset_reason = (
+                    f"Completed {self._session_task_count} tasks "
+                    f"(max {self._max_tasks_per_session} per session)"
+                )
+
+            # Check context window limit
+            elif self._context_window_max_chars > 0:
+                usage_pct = self._session_chars_used / self._context_window_max_chars
+                if usage_pct >= self._context_window_threshold:
+                    reset_reason = (
+                        f"Used ~{self._session_chars_used} chars "
+                        f"({usage_pct:.0%} of {self._context_window_max_chars}) — "
+                        f"exceeds {self._context_window_threshold:.0%} threshold"
+                    )
+
+            if reset_reason:
+                self.log_activity("Session reset", reset_reason)
+                self.reset_session()
 
         # Determine which model to use
         model = self._get_model_for_task(task, config)
@@ -207,8 +317,41 @@ class BaseAgent(ABC):
 
         timeout = effective_timeout
 
-        # Build the prompt (with urgency hint for simple tasks)
-        prompt = self._build_prompt(task, context, is_simple=(complexity == 'simple'))
+        # Determine if we'll be resuming an existing session
+        will_resume = bool(self._session_continuity and self._session_id)
+
+        # On resume, detect files changed by other agents since our last task
+        changed_files: List[str] = []
+        if will_resume:
+            changed_files = self._scan_changed_files(project_path)
+            if changed_files:
+                self.log_activity(
+                    "Stale file warning",
+                    f"{len(changed_files)} file(s) changed since last task"
+                )
+
+        # Build the prompt (skip agent definition on resume since Claude already knows)
+        prompt = self._build_prompt(
+            task, context,
+            is_simple=(complexity == 'simple'),
+            resuming=will_resume,
+            changed_files=changed_files
+        )
+
+        # Log the prompt BEFORE calling the CLI so we can see what was sent
+        # even if the call hangs or crashes
+        await log_cli_call(
+            project_path=project_path,
+            agent_name=self.name,
+            agent_role=self.role,
+            prompt=prompt,
+            model=model or "default",
+            status="started",
+            result_summary="(awaiting response...)",
+            resuming=will_resume,
+            session_chars_used=self._session_chars_used,
+            context_window_max=self._context_window_max_chars
+        )
 
         try:
             # Write prompt to temp file to avoid shell escaping issues
@@ -227,6 +370,12 @@ class BaseAgent(ABC):
 
                 self.log_activity("Task complete", result[:100] if result else "No output")
 
+                # Track context window usage (prompt + response chars)
+                self._session_chars_used += len(prompt) + len(result or "")
+                self._session_task_count += 1
+                # Record when this agent finished so we can detect stale files on next resume
+                self._last_task_finished = time.time()
+
                 await log_cli_call(
                     project_path=project_path,
                     agent_name=self.name,
@@ -234,7 +383,10 @@ class BaseAgent(ABC):
                     prompt=prompt,
                     model=model or "default",
                     status="complete",
-                    result_summary=result[:300] if result else ""
+                    result_summary=result if result else "",
+                    resuming=will_resume,
+                    session_chars_used=self._session_chars_used,
+                    context_window_max=self._context_window_max_chars
                 )
 
                 return {
@@ -250,6 +402,8 @@ class BaseAgent(ABC):
 
         except asyncio.TimeoutError:
             self.log_activity("Task timeout", f"Exceeded {timeout}s")
+            # Timeouts still consume context — track the prompt at least
+            self._session_chars_used += len(prompt)
             await log_cli_call(
                 project_path=project_path,
                 agent_name=self.name,
@@ -257,7 +411,10 @@ class BaseAgent(ABC):
                 prompt=prompt,
                 model=model or "default",
                 status="timeout",
-                result_summary=f"Task timed out after {timeout} seconds"
+                result_summary=f"Task timed out after {timeout} seconds",
+                resuming=will_resume,
+                session_chars_used=self._session_chars_used,
+                context_window_max=self._context_window_max_chars
             )
             return {
                 "status": "timeout",
@@ -265,7 +422,8 @@ class BaseAgent(ABC):
                 "agent": self.name
             }
         except Exception as e:
-            self.log_activity("Task error", str(e))
+            error_msg = str(e)
+            self.log_activity("Task error", error_msg)
             await log_cli_call(
                 project_path=project_path,
                 agent_name=self.name,
@@ -273,11 +431,14 @@ class BaseAgent(ABC):
                 prompt=prompt,
                 model=model or "default",
                 status="error",
-                result_summary=str(e)[:300]
+                result_summary=error_msg,
+                resuming=will_resume,
+                session_chars_used=self._session_chars_used,
+                context_window_max=self._context_window_max_chars
             )
             return {
                 "status": "error",
-                "result": str(e),
+                "result": error_msg,
                 "agent": self.name
             }
 
@@ -380,38 +541,23 @@ class BaseAgent(ABC):
         heartbeat_task = asyncio.create_task(self._heartbeat_logger(process))
 
         try:
-            if self.stream_callback:
-                # Debug mode: write prompt to stdin, then stream output line-by-line
-                process.stdin.write(prompt_bytes)
-                await process.stdin.drain()
-                process.stdin.close()
-                output_lines = []
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    decoded = line.decode('utf-8', errors='replace')
-                    output_lines.append(decoded)
-                    try:
-                        await self.stream_callback(self.name, decoded)
-                    except Exception:
-                        pass  # Never let streaming errors break the task
-                await process.wait()
-                output = ''.join(output_lines)
-                # Still capture stderr
-                stderr_data = await process.stderr.read()
-                if stderr_data:
-                    error_output = stderr_data.decode('utf-8', errors='replace')
-                    if error_output.strip():
-                        output += f"\n\nStderr:\n{error_output}"
-            else:
-                # Normal mode: pipe prompt via stdin and wait for full output
-                stdout, stderr = await process.communicate(input=prompt_bytes)
-                output = stdout.decode('utf-8', errors='replace')
-                if stderr:
-                    error_output = stderr.decode('utf-8', errors='replace')
-                    if error_output.strip():
-                        output += f"\n\nStderr:\n{error_output}"
+            # Always use communicate() for reliable I/O. The previous readline()
+            # streaming loop added latency (each line awaited a WebSocket broadcast)
+            # and didn't work well with --output-format json (output arrives as a
+            # single JSON blob, not line-by-line text).
+            stdout, stderr = await process.communicate(input=prompt_bytes)
+            output = stdout.decode('utf-8', errors='replace')
+            if stderr:
+                error_output = stderr.decode('utf-8', errors='replace')
+                if error_output.strip():
+                    output += f"\n\nStderr:\n{error_output}"
+
+            # Fire debug callback with full output (non-blocking)
+            if self.stream_callback and output:
+                try:
+                    asyncio.create_task(self.stream_callback(self.name, output))
+                except Exception:
+                    pass
         except asyncio.CancelledError:
             # Kill the entire process tree, not just the parent
             self._kill_process_tree(process)
@@ -487,6 +633,17 @@ class BaseAgent(ABC):
             if data.get("is_error"):
                 self.log_activity("Session reset", "CLI reported error; clearing session")
                 self._session_id = None
+                self._session_chars_used = 0
+
+            # Track token usage if the CLI reports it (future-proofing)
+            usage = data.get("usage", {})
+            if usage:
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+                if input_tokens or output_tokens:
+                    # ~4 chars per token is a rough estimate
+                    estimated_chars = (input_tokens + output_tokens) * 4
+                    self._session_chars_used = max(self._session_chars_used, estimated_chars)
 
             # Return the result text, falling back to raw output
             return data.get("result", raw_output)

@@ -52,7 +52,11 @@ Each agent receives **minimal injected context** - just what it needs:
 - Sibling tasks in the current section only (max 3, uncompleted only)
 - No spec dump, no completed tasks, no unrelated sections
 
-With **session continuity** enabled, agents retain codebase knowledge from prior tasks — no re-reading files they already know. This keeps API costs low and agents focused.
+With **session continuity** enabled, agents retain codebase knowledge from prior tasks — no re-reading files they already know. On resumed sessions, the agent definition (role, system prompt, boilerplate instructions) is **skipped entirely** since Claude already has it from the first turn. This keeps API costs low and agents focused.
+
+### Context Window Management
+
+The system tracks estimated context usage per agent session. When an agent approaches the configurable context window threshold (default 65%), its session is automatically reset so the next task starts a fresh conversation instead of hitting the context limit mid-task. Additionally, `max_tasks_per_session` (default 5) forces a session reset after a set number of tasks regardless of context usage, preventing gradual degradation. This is configured via the `context_window` section in `config.json`.
 
 ### Live Documentation Lookup
 
@@ -126,7 +130,7 @@ Open [http://localhost:8080](http://localhost:8080) (default port, configurable 
 3. (Optional) Check **Fast Project** to skip Testing, Security, and QA by default
 3. Click **Start Kickoff**
 4. Describe what you want to build
-5. Answer the PM's questions (10-20 depending on complexity)
+5. Answer the PM's questions (default 18 for projects, 10 for features)
 6. Click **Write Spec** when ready
 7. Click **Start Work** - agents take over
 8. When prompted, click **Start UAT** to review and approve
@@ -211,7 +215,23 @@ Each agent runs as a **Claude Code CLI process** (`claude --print`):
 
 **Concurrency:** Each agent type has its own CLI session, but only `max_concurrent_agents` run at once (controlled by an asyncio semaphore). Setting this to 2 means two agents work in parallel; the rest queue.
 
-**Session Continuity:** When `session_continuity` is enabled in config, agents reuse their Claude CLI session across tasks via `--resume <session_id>`. This eliminates cold-start overhead — the agent remembers the codebase, previous decisions, and files from earlier tasks. Sessions reset automatically when a new project or feature starts. Disable with `"session_continuity": false` to revert to stateless mode.
+**Session Continuity:** When `session_continuity` is enabled in config, agents reuse their Claude CLI session across tasks via `--resume <session_id>`. This eliminates cold-start overhead — the agent remembers the codebase, previous decisions, and files from earlier tasks. On resumed sessions, agent definitions (role context, system prompt, boilerplate instructions) are omitted from the prompt since Claude already has them. Sessions reset automatically when a new project or feature starts, when the CLI reports an error, or when context window usage exceeds the configured threshold. Disable with `"session_continuity": false` to revert to stateless mode.
+
+**Context Window Tracking:** Each agent tracks cumulative chars sent/received in its session. When usage exceeds the `context_window.threshold_percent` (default 65%) of `context_window.max_chars`, the session is reset before the next task so the agent starts fresh instead of hitting the context limit mid-work. If the CLI returns token usage data, that is used for more accurate tracking. The `max_tasks_per_session` setting (default 5) provides a hard cap — after that many tasks, the session resets regardless of context usage. Set `max_chars` to `0` to disable tracking.
+
+**Per-Agent Model Configuration:** Each agent can be configured with a specific model in the `agents` section of `config.json`. Set `"model": "opus"` to always use the powerful model, `"model": "sonnet"` for the fast model, or `"model": "auto"` to let model routing decide based on task complexity.
+
+**Guardrails:** The `guardrails` section controls safety boundaries. `require_approval_for` and `blocked_operations` accept lists of operation patterns. `max_retries_before_escalation` (default 5) sets how many times a task can fail before escalating to the user.
+
+**Debug Mode:** Set `debug.enabled` to `true` and `debug.stream_output` to `true` to see real-time CLI output from agents in the console. Useful for development and troubleshooting.
+
+**Memory:** The `memory.max_action_log_entries` setting (default 10) controls how many recent action log entries are retained in working memory.
+
+**CLI Options:** `cli.dangerously_skip_permissions` passes the `--dangerously-skip-permissions` flag to Claude CLI processes, bypassing tool permission prompts. This is required for fully autonomous operation but should be used with caution.
+
+**UAT Questions:** `uat_questions` (default 100) controls the maximum number of questions during user acceptance testing.
+
+**Stale File Detection:** When multiple agents work in parallel, Agent A may modify files that Agent B previously read in an earlier turn. On resumed sessions, the system scans the project for files modified since the agent's last task and injects a "Files Changed Since Your Last Task" warning into the prompt. This tells the agent to re-read those files before editing them, preventing overwrites of another agent's work. The scan is lightweight (mtime-based) and capped at 30 files to avoid bloating the prompt.
 
 **Timeouts:** Timeouts are not retried (a timed-out prompt will almost certainly time out again). Exceptions are retried up to `max_task_retries` times with error context appended so the agent can adapt.
 
@@ -239,15 +259,33 @@ Edit `config.json`:
     "enabled": true,
     "auto_detect": true,
     "screenshot_dir": "QA",
+    "default_timeout": 30000,
     "browser": "chromium",
-    "headless": false
-  },
-  "model_routing": {
-    "enabled": true,
-    "models": {
-      "powerful": "claude-opus-4-20250514",
-      "fast": "claude-sonnet-4-20250514"
+    "headless": false,
+    "viewport": {
+      "width": 1280,
+      "height": 720
     }
+  },
+  "guardrails": {
+    "require_approval_for": [],
+    "blocked_operations": [],
+    "max_retries_before_escalation": 5
+  },
+  "agents": {
+    "project_manager": { "enabled": true, "model": "opus" },
+    "software_engineer": { "enabled": true, "model": "auto" },
+    "ui_ux_engineer": { "enabled": true, "model": "auto" },
+    "database_admin": { "enabled": true, "model": "opus" },
+    "security_reviewer": { "enabled": true, "model": "opus" },
+    "testing_agent": { "enabled": true, "model": "auto" },
+    "qa_tester": { "enabled": true, "model": "auto" }
+  },
+  "project_kickoff_questions": 18,
+  "feature_kickoff_questions": 10,
+  "uat_questions": 100,
+  "cli": {
+    "dangerously_skip_permissions": true
   },
   "execution": {
     "max_concurrent_agents": 2,
@@ -256,8 +294,29 @@ Edit `config.json`:
     "max_task_retries": 2,
     "allow_cross_section_parallel": true,
     "enable_task_batching": true,
-    "task_batch_size": 7,
+    "task_batch_size": 3,
     "session_continuity": true
+  },
+  "debug": {
+    "enabled": true,
+    "stream_output": true
+  },
+  "server_port": 8080,
+  "context_window": {
+    "max_chars": 800000,
+    "threshold_percent": 65,
+    "max_tasks_per_session": 5
+  },
+  "memory": {
+    "max_action_log_entries": 10
+  },
+  "model_routing": {
+    "enabled": true,
+    "default": "opus",
+    "models": {
+      "fast": "claude-sonnet-4-20250514",
+      "powerful": "claude-opus-4-20250514"
+    }
   }
 }
 ```
@@ -338,7 +397,7 @@ projects/my-app/
   TODO.md           # Task list with checkboxes
   MEMORY.md         # Decisions and lessons learned
   SUMMARY.md        # Completion summary (after done)
-  log.md            # Full Claude CLI call log (prompts + results)
+  log.md            # Full Claude CLI call log (prompts, results, context usage %)
   error_log.md      # Error and timeout details
   QA/               # QA notes and screenshots
   src/              # Your actual code
@@ -400,12 +459,25 @@ Increase timeouts in `config.json`:
 
 If the orchestrator keeps splitting a task without executing it, check TODO.md for malformed lines (e.g. leftover retry messages parsed as separate tasks). Clean up the TODO and restart work.
 
+### Agents losing context or hitting context limits
+
+The system tracks estimated context usage per session. If agents seem to lose context or fail with context-related errors, check `log.md` for the **Context usage** line. You can tune the threshold in `config.json`:
+```json
+"context_window": {
+  "max_chars": 800000,
+  "threshold_percent": 65,
+  "max_tasks_per_session": 5
+}
+```
+
+Lower `threshold_percent` to reset sessions earlier (e.g. 50%). Increase `max_chars` if you're using a model with a larger context window. Set `max_chars` to `0` to disable automatic resets.
+
 ### Want more/fewer kickoff questions
 
 Adjust in `config.json`:
 ```json
-"project_kickoff_questions": 15,
-"feature_kickoff_questions": 8
+"project_kickoff_questions": 18,
+"feature_kickoff_questions": 10
 ```
 
 ---
@@ -415,11 +487,15 @@ Adjust in `config.json`:
 This system is designed to minimize token usage:
 
 - **Session continuity** - Agents resume their CLI session across tasks, eliminating cold-start re-discovery of the codebase
+- **Agent definition skipped on resume** - Role context, system prompt, and boilerplate instructions are only sent on the first message in a session; subsequent tasks omit them since Claude already knows
+- **Context window auto-reset** - Sessions approaching the context limit (configurable, default 65%) are automatically reset so the next task starts fresh instead of failing mid-work
+- **Stale file detection** - On resume, agents are warned about files modified by other agents since their last turn, preventing stale reads and accidental overwrites
 - **Minimal injected context** - Only recent decisions and sibling tasks; agents read files themselves as needed
 - **Smart model routing** - Sonnet for simple tasks, Opus for complex
 - **Concise task lists** - 10-30 meaningful tasks, not 200 micro-steps
 - **No timeout retries** - Timed-out tasks escalate instead of burning tokens retrying
 - **Error-aware retries** - Exception retries include the previous error so the agent adapts instead of repeating the same mistake
+- **Full logging** - `log.md` records complete prompts and results per CLI call (with context usage %), so you can audit exactly what was sent
 
 You're already paying for Claude Code. This just uses it smarter.
 

@@ -1,6 +1,7 @@
 """Memory Manager - Handles persistent context and memory for projects."""
 
 import os
+import re
 import json
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -14,10 +15,12 @@ class MemoryManager:
     Memory is stored in MEMORY.md within the project directory.
     """
 
-    def __init__(self, project_path: str):
+    def __init__(self, project_path: str, config: Optional[Dict[str, Any]] = None):
         self.project_path = project_path
         self.memory_file = os.path.join(project_path, "MEMORY.md")
         self._file_cache: Dict[str, Dict[str, Any]] = {}
+        memory_config = (config or {}).get('memory', {})
+        self.max_action_log_entries = memory_config.get('max_action_log_entries', 15)
         self._ensure_memory_file()
 
     def _ensure_memory_file(self):
@@ -52,7 +55,7 @@ class MemoryManager:
             f.write(content)
 
     def record_action(self, agent: str, task: str, result: str):
-        """Record an action taken by an agent."""
+        """Record an action taken by an agent, capping at max_action_log_entries."""
         with open(self.memory_file, 'r') as f:
             content = f.read()
 
@@ -61,13 +64,39 @@ class MemoryManager:
         brief_result = result[:200] + "..." if len(result) > 200 else result
         entry = f"- [{timestamp}] **{agent}**: {task[:100]}\n  - Result: {brief_result}\n"
 
-        # Insert after ## Actions Log header
+        # Insert after ## Actions Log header and prune old entries
         marker = "## Actions Log\n"
         if marker in content:
             pos = content.find(marker) + len(marker)
-            next_newline = content.find("\n", pos)
-            if next_newline != -1:
-                content = content[:next_newline+1] + entry + content[next_newline+1:]
+            # Find the end of the Actions Log section (next ## header or EOF)
+            end_marker = "## Lessons Learned"
+            end_pos = content.find(end_marker, pos) if end_marker in content[pos:] else len(content)
+
+            section_before = content[:pos]
+            section_after = content[end_pos:]
+            actions_block = content[pos:end_pos]
+
+            # Parse existing entries (each starts with "- [")
+            entries = []
+            current_entry = []
+            for line in actions_block.split('\n'):
+                if line.startswith('- ['):
+                    if current_entry:
+                        entries.append('\n'.join(current_entry))
+                    current_entry = [line]
+                elif current_entry and line.strip():
+                    current_entry.append(line)
+                elif current_entry:
+                    entries.append('\n'.join(current_entry))
+                    current_entry = []
+            if current_entry:
+                entries.append('\n'.join(current_entry))
+
+            # Prepend new entry and cap at MAX_ACTION_LOG_ENTRIES
+            entries.insert(0, entry.rstrip())
+            entries = entries[:self.max_action_log_entries]
+
+            content = section_before + '\n' + '\n'.join(entries) + '\n\n' + section_after
 
         with open(self.memory_file, 'w') as f:
             f.write(content)
@@ -118,16 +147,32 @@ class MemoryManager:
 
         return "\n\n---\n\n".join(context_parts) if context_parts else ""
 
+    # Pattern to strip {ID} prefix and [depends: ...] suffix from task lines
+    _TASK_METADATA_RE = re.compile(
+        r'(?:\{\d+\}\s*)'           # optional {ID} prefix
+        r'|'
+        r'(?:\s*\[depends:\s*[\d,\s]+\])'  # optional [depends: ...] suffix
+    )
+
+    def _clean_task_line(self, line: str) -> str:
+        """Strip {ID} and [depends: ...] metadata from a TODO line.
+
+        Agents don't need internal bookkeeping metadata — it confuses them
+        and wastes tokens.  Return just the human-readable task text.
+        """
+        return self._TASK_METADATA_RE.sub('', line).strip()
+
     def _filter_todo_for_section(self, todo_content: str, section: Optional[str]) -> str:
         """
         Filter TODO.md to only include uncompleted tasks from the specified section.
         This reduces token usage by excluding completed tasks and unrelated sections.
+        Strips internal metadata ({ID}, [depends:]) so agents see clean task text.
         """
         lines = todo_content.split('\n')
 
         # If no section specified, return a few uncompleted tasks for minimal awareness
         if not section:
-            uncompleted = [line for line in lines if '[ ]' in line]
+            uncompleted = [self._clean_task_line(line) for line in lines if '[ ]' in line]
             return '\n'.join(uncompleted[:3])
 
         # Normalize section name for matching
@@ -151,7 +196,7 @@ class MemoryManager:
 
             # If in target section, collect uncompleted tasks only
             if in_target_section and '[ ]' in line:
-                section_tasks.append(line)
+                section_tasks.append(self._clean_task_line(line))
 
         return '\n'.join(section_tasks)
 
