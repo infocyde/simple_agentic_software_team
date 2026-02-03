@@ -7,7 +7,7 @@ import json
 from typing import Dict, Any, Optional, Callable, List
 from datetime import datetime
 from utils.cli_logger import log_cli_call
-from utils.secrets import load_agent_secrets
+from utils.secrets import load_project_secrets
 
 
 class ConversationManager:
@@ -327,7 +327,7 @@ Question #{self.question_count + 1}: Ask your first question about this feature.
     def _build_pm_env(self) -> Dict[str, str]:
         """Build environment variables for PM subprocess calls."""
         env = os.environ.copy()
-        env.update(load_agent_secrets("project_manager"))
+        env.update(load_project_secrets(self.project_path))
         env['PYTHONIOENCODING'] = 'utf-8'
         env['PYTHONUTF8'] = '1'
         return env

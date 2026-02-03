@@ -41,8 +41,8 @@
                             {% elif project.workflow_status == 'security_review' %}
                             <span class="badge badge-security">Security</span>
                             {% elif project.workflow_status == 'wip' %}
-                            <span class="badge badge-wip">WIP {{ project.todo_completed }}/{{ project.todo_total }}</span>
-                            {% elif project.todo_total > 0 %}
+                            <span class="badge badge-wip">WIP {{ project.get('todo_completed', 0) }}/{{ project.get('todo_total', 0) }}</span>
+                            {% elif project.get('todo_total', 0) > 0 %}
                             <span class="badge badge-progress">{{ project.todo_completed }}/{{ project.todo_total }}</span>
                             {% else %}
                             <span class="badge badge-new">New</span>
