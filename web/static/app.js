@@ -141,6 +141,17 @@ class AgenticTeamApp {
                 });
                 break;
 
+            case 'project_deleted':
+                // Remove from sidebar and reset view if it was selected
+                const deletedItem = document.querySelector(`.project-item[data-name="${data.project}"]`);
+                if (deletedItem) deletedItem.remove();
+                if (this.currentProject === data.project) {
+                    this.currentProject = null;
+                    document.getElementById('projectView').style.display = 'none';
+                    document.getElementById('noProjectSelected').style.display = 'block';
+                }
+                break;
+
             case 'agent_start':
                 this.addActiveAgent(data.agent);
                 break;
@@ -238,6 +249,8 @@ class AgenticTeamApp {
         document.getElementById('launchProjectBtn').addEventListener('click', () => this.launchProject());
         document.getElementById('stopLaunchBtn').addEventListener('click', () => this.stopLaunch());
         document.getElementById('launchLogBtn').addEventListener('click', () => this.showLaunchLogModal());
+        document.getElementById('zipProjectBtn').addEventListener('click', () => this.zipProject());
+        document.getElementById('deleteProjectBtn').addEventListener('click', () => this.deleteProject());
         document.getElementById('openRunitBtn').addEventListener('click', () => this.showRunitModal());
         document.getElementById('closeRunitModal').addEventListener('click', () => {
             this.hideModals();
@@ -1540,6 +1553,42 @@ class AgenticTeamApp {
             }
         } catch (error) {
             console.error('Error toggling debug mode:', error);
+        }
+    }
+
+    async deleteProject() {
+        if (!this.currentProject) return;
+        if (!confirm(`Are you sure you want to permanently delete "${this.currentProject}"? This cannot be undone.`)) return;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}`, { method: 'DELETE' });
+            if (!res.ok) {
+                let msg = `Server error (${res.status})`;
+                try { const data = await res.json(); msg = data.detail || msg; } catch (_) {}
+                this.showErrorModal(msg);
+            }
+        } catch (error) {
+            this.showErrorModal('Failed to delete project: ' + error.message);
+        }
+    }
+
+    async zipProject() {
+        if (!this.currentProject) return;
+        if (!confirm(`Zip and archive "${this.currentProject}"? The project will be moved to zip_projects/ and removed from the dashboard.`)) return;
+
+        try {
+            const res = await fetch(`/api/projects/${this.currentProject}/zip`, { method: 'POST' });
+            if (res.ok) {
+                let msg = 'Project archived successfully';
+                try { const data = await res.json(); msg = data.message || msg; } catch (_) {}
+                this.showCompletionToast(msg);
+            } else {
+                let msg = `Server error (${res.status})`;
+                try { const data = await res.json(); msg = data.detail || msg; } catch (_) {}
+                this.showErrorModal(msg);
+            }
+        } catch (error) {
+            this.showErrorModal('Failed to zip project: ' + error.message);
         }
     }
 }

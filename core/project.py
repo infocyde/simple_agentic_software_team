@@ -339,11 +339,64 @@ build/
             }
 
         import shutil
-        shutil.rmtree(project_path)
+        import stat
+        import platform
+
+        def _force_remove(func, path, _exc_info):
+            """Handle read-only and reserved-name files (Windows)."""
+            try:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+                func(path)
+            except OSError:
+                # On Windows, reserved names (nul, con, etc.) need \\?\ prefix
+                if platform.system() == 'Windows':
+                    win_path = '\\\\?\\' + os.path.abspath(path)
+                    try:
+                        os.chmod(win_path, stat.S_IWRITE | stat.S_IREAD)
+                    except OSError:
+                        pass
+                    try:
+                        os.unlink(win_path)
+                    except OSError:
+                        pass  # Skip truly undeletable files
+
+        shutil.rmtree(project_path, onerror=_force_remove)
 
         return {
             "status": "success",
             "message": f"Project '{name}' deleted"
+        }
+
+    def zip_project(self, name: str) -> Dict[str, Any]:
+        """Zip a project into zip_projects/ and then delete the original."""
+        import shutil
+
+        project_path = os.path.join(self.projects_dir, name)
+        if not os.path.exists(project_path):
+            return {
+                "status": "error",
+                "message": f"Project '{name}' not found"
+            }
+
+        zip_dir = os.path.join(self.base_path, "zip_projects")
+        os.makedirs(zip_dir, exist_ok=True)
+
+        zip_base = os.path.join(zip_dir, name)
+        try:
+            zip_path = shutil.make_archive(zip_base, 'zip', self.projects_dir, name)
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to zip project: {str(e)}"
+            }
+
+        # Delete the original project
+        self.delete_project(name, confirm=True)
+
+        return {
+            "status": "success",
+            "message": f"Project '{name}' archived to {os.path.basename(zip_path)} and deleted",
+            "zip_path": zip_path
         }
 
     def get_workflow_status(self, name: str) -> Dict[str, Any]:

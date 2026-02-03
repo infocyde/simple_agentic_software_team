@@ -537,6 +537,78 @@ async def force_stop(name: str):
     return {"status": "stopped", "details": stopped}
 
 
+@app.delete("/api/projects/{name}")
+async def delete_project(name: str):
+    """Delete a project and clean up any active work."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Stop any active work (best-effort)
+    try:
+        if name in active_orchestrators:
+            await active_orchestrators[name].force_stop()
+            del active_orchestrators[name]
+    except Exception:
+        active_orchestrators.pop(name, None)
+    try:
+        if name in active_conversations:
+            active_conversations[name].stop()
+            del active_conversations[name]
+    except Exception:
+        active_conversations.pop(name, None)
+
+    try:
+        result = project_manager.delete_project(name, confirm=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete project: {str(e)}")
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("message"))
+
+    await broadcast_message({
+        "type": "project_deleted",
+        "project": name
+    })
+
+    return result
+
+
+@app.post("/api/projects/{name}/zip")
+async def zip_project(name: str):
+    """Zip a project into zip_projects/ and delete the original."""
+    project_path = project_manager.get_project_path(name)
+    if not project_path:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Stop any active work (best-effort)
+    try:
+        if name in active_orchestrators:
+            await active_orchestrators[name].force_stop()
+            del active_orchestrators[name]
+    except Exception:
+        active_orchestrators.pop(name, None)
+    try:
+        if name in active_conversations:
+            active_conversations[name].stop()
+            del active_conversations[name]
+    except Exception:
+        active_conversations.pop(name, None)
+
+    try:
+        result = project_manager.zip_project(name)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to zip project: {str(e)}")
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("message"))
+
+    await broadcast_message({
+        "type": "project_deleted",
+        "project": name
+    })
+
+    return result
+
+
 @app.post("/api/projects/{name}/pause")
 async def pause_work(name: str):
     """Pause work on the project (completes current task first)."""

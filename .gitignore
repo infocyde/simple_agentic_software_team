@@ -213,3 +213,5 @@ projects/
 # Local environment overrides
 .env.local
 secrets/
+
+zip_projects/
