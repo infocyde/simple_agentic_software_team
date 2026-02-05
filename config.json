@@ -78,9 +78,9 @@
   },
   "server_port": 8080,
   "context_window": {
-    "max_chars": 800000,
+    "max_chars": 3200000,
     "threshold_percent": 65,
-    "max_tasks_per_session": 5
+    "max_tasks_per_session": 10
   },
   "memory": {
     "max_action_log_entries": 10
@@ -89,8 +89,8 @@
     "enabled": true,
     "default": "opus",
     "models": {
-      "fast": "claude-sonnet-4-20250514",
-      "powerful": "claude-opus-4-20250514"
+      "fast": "claude-sonnet-5-20260203",
+      "powerful": "claude-opus-4-6-20260205"
     }
   }
 }

@@ -552,11 +552,11 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
         last_error: Optional[str] = None
 
         while retries < self.max_task_retries:
-            # On retry, append the previous error so the agent can adapt
+            # On retry, append brief error hint so the agent can adapt
             effective_task = task
             if last_error:
-                error_brief = last_error.split('\n')[0][:150].strip()
-                effective_task = f"{task}\n\n(Previous attempt failed: {error_brief}. Adjust your approach.)"
+                error_brief = last_error.split('\n')[0][:80].strip()
+                effective_task = f"{task}\n\n[Retry: {error_brief}]"
 
             try:
                 # Notify UI that agent is starting
@@ -588,8 +588,8 @@ Please reply with one of: retry, skip, modify, remove, or stop"""
                     self._log_activity({
                         "timestamp": datetime.now().isoformat(),
                         "agent": "orchestrator",
-                        "action": "Timeout (no retry)",
-                        "details": f"Task timed out after {self.task_timeout}s — skipping retry to save tokens"
+                        "action": "Timeout",
+                        "details": f"{self.task_timeout}s"
                     })
                     await self._log_error(
                         error_type="timeout",
@@ -1017,8 +1017,10 @@ If the project involves Python, ensure the TODO list includes, near the top, a t
         agent_name = self._determine_agent_for_task(task_text)
 
         mgmt_port = self.config.get("server_port", 8080)
-        port_warning = f"\n\nIMPORTANT: Port {mgmt_port} is reserved for the management interface. If you need to start a web server or use Playwright, NEVER use port {mgmt_port}."
-        task_context = f"Section: {task['section']}\n\n" + self.memory.get_context_for_task(task_text, section=task['section']) + port_warning
+        memory_context = self.memory.get_context_for_task(task_text, section=task['section'])
+        task_context = f"Section: {task['section']}\nAvoid port {mgmt_port} (reserved)."
+        if memory_context:
+            task_context += f"\n\n{memory_context}"
 
         result = await self.assign_task(
             agent_name=agent_name,

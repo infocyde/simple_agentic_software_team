@@ -4,7 +4,13 @@
 
 ![NightRonin](web/static/night-ronin.png)
 
-> **Experimental Software** — This project is under active development and provided as-is, with no warranties or guarantees. Use at your own risk. By design, this tool spawns multiple concurrent Claude Code CLI processes. While this does not violate Anthropic's Terms of Service, setting `max_concurrent_agents` to an excessively high value may trigger rate limits or draw scrutiny from Anthropic. Use reasonable concurrency settings and monitor your usage accordingly. Additionally, execution speed is still being optimized — expect slower-than-ideal runtimes as we continue to improve performance.
+> **Experimental Software** — This project is under active development and provided as-is, with no warranties or guarantees. Use at your own risk.
+>
+> **How it works:** You describe what you want to build. A Project Manager agent asks clarifying questions, then generates a spec and task list. Specialized agents (engineers, DBA, security, QA) execute tasks in parallel, coordinating through shared project files. The system tracks progress, handles failures with retries, and guides you through final approval.
+>
+> **Known limitations:** Occasional unexplained timeouts and hangs occur, particularly during PM conversations. The system is built to handle this gracefully — conversation state is saved progressively, so if a process hangs, simply restart and it resumes where it left off. Task execution also supports auto-retry with error context.
+>
+> **Concurrency note:** This tool spawns multiple concurrent Claude Code CLI processes. While this does not violate Anthropic's Terms of Service, setting `max_concurrent_agents` too high may trigger rate limits. Use reasonable concurrency settings and monitor usage accordingly.
 
 ![Dashboard](web/static/dashboard.png)
 
@@ -36,7 +42,7 @@ The result: better architecture, cleaner code, fewer blind spots.
 | **Database Admin** | Schema design, queries, migrations, data layer optimization |
 | **Testing Agent** | Test creation and execution (before security review) |
 | **Security Reviewer** | Security audits, vulnerability detection, code review |
-| **QA Tester** | Automated QA passes (optionally via Playwright) |
+| **QA Tester** | Automated QA passes (optionally via agent-browser) |
 
 ### Intelligent Task Management
 
@@ -280,15 +286,7 @@ Edit `config.json`:
   },
   "playwright": {
     "enabled": true,
-    "auto_detect": true,
-    "screenshot_dir": "QA",
-    "default_timeout": 30000,
-    "browser": "chromium",
-    "headless": false,
-    "viewport": {
-      "width": 1280,
-      "height": 720
-    }
+    "screenshot_dir": "QA"
   },
   "guardrails": {
     "require_approval_for": [],
@@ -344,15 +342,21 @@ Edit `config.json`:
 }
 ```
 
-### Secrets (Local Only)
+### Secrets
 
-Use the `secrets/` directory as the canonical location for any project-related secrets, including API keys needed by libraries or MCP servers. Store per-agent secrets in `secrets/<agent>.env` (for example, `secrets/software_engineer.env`). These files are ignored by git. In production, do **not** push or ship secrets from this repo—use your platform's secret manager or environment configuration, and be cautious with any values placed in these files. If your environment requires secrets to live outside the repo, move them and set the corresponding environment variables before running (or use a symlink). Some setups may require relocating these files for compliance.
+Secrets are loaded from two locations (later values override earlier):
 
-Common examples (not exhaustive):
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `MCP_SERVER_API_KEY`
-- `DATABASE_URL`
+1. **Global**: `secrets/.env` — shared across all projects
+2. **Project**: `{project_path}/.env` — project-specific overrides
+
+Example `secrets/.env`:
+```bash
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+DATABASE_URL=postgres://...
+```
+
+These files are gitignored. Values already set in your environment are not overwritten. In production, use your platform's secret manager instead of committing secrets.
 
 Quality gates can be overridden per project in the UI (saved in `STATUS.json`), along with a per‑project `testing_strategy` when Fast mode is enabled. Example:
 
@@ -376,19 +380,23 @@ Fast mode is a per‑project preset that:
 
 You can enable this when creating a project via the **Fast Project** checkbox in the UI.
 
-### QA + Playwright (Optional)
+### QA + Agent-Browser (Optional)
 
-The QA step can use the Playwright MCP server inside Claude Code for browser-based testing and screenshots.
+The QA step can use [agent-browser](https://github.com/vercel-labs/agent-browser) for browser-based testing and screenshots. Agent-browser is a CLI tool designed specifically for AI agents, with 93% less context usage than traditional Playwright MCP.
 
 To enable it:
-1. Install the MCP server (npm): `npm i -g @anthropic/mcp-server-playwright`
-2. Register it with Claude Code by adding it to your `mcp_servers.json` (location varies):
-   - `~/.claude/mcp_servers.json`
-   - `~/.config/claude/mcp_servers.json`
-   - `%APPDATA%\\claude\\mcp_servers.json`
-3. Keep `playwright.enabled` set to `true` in `config.json`.
+1. Install agent-browser globally: `npm install -g agent-browser`
+2. Install the bundled browser: `agent-browser install`
+3. Keep `playwright.enabled` set to `true` in `config.json` (the setting name is legacy but controls browser automation).
 
-If you don't want browser-based QA, set `playwright.enabled` to `false`. The QA agent will still run, but without Playwright automation.
+The QA agent uses agent-browser via Bash commands:
+- `agent-browser open <url>` - Navigate to a page
+- `agent-browser snapshot -i` - Get interactive elements as refs (@e1, @e2, etc.)
+- `agent-browser click @e1` - Click using ref from snapshot
+- `agent-browser fill @e2 "text"` - Fill input fields
+- `agent-browser screenshot QA/test.png` - Capture evidence
+
+If you don't want browser-based QA, set `playwright.enabled` to `false`. The QA agent will still run, but without browser automation.
 
 ### Testing Strategies
 
@@ -434,6 +442,9 @@ projects/my-app/
   error_log.md      # Error and timeout details
   launch.log        # Output from the UAT Launch process
   QA/               # QA notes and screenshots
+  schema/           # Database scripts (created by DBA agent)
+    create_database.sql        # Initial schema
+    db_migration_*.sql         # Subsequent migrations
   src/              # Your actual code
   .git/             # Version controlled from the start
 ```
@@ -471,7 +482,7 @@ For programmatic access or building your own UI:
 | `/api/projects/{name}/launch` | POST | Launch project using runit.md |
 | `/api/projects/{name}/stop-launch` | POST | Stop launched project |
 | `/api/projects/{name}/launch-log` | GET | Read launch.log |
-| `/api/playwright/status` | GET | Playwright availability |
+| `/api/playwright/status` | GET | Browser automation (agent-browser) availability |
 | `/ws` | WebSocket | Real-time activity stream |
 
 ---

@@ -130,8 +130,8 @@ class MemoryManager:
         """
         context_parts = []
 
-        # Include recent decisions (last 5) — small and high-value for architectural guidance
-        decisions = self._get_recent_decisions(5)
+        # Include recent decisions (last 2) — minimal but high-value for architectural guidance
+        decisions = self._get_recent_decisions(2)
         if decisions:
             context_parts.append("Recent decisions:\n" + "\n".join(decisions))
 
@@ -145,7 +145,7 @@ class MemoryManager:
                 if filtered_todo:
                     context_parts.append(f"Other tasks in this section:\n{filtered_todo}")
 
-        return "\n\n---\n\n".join(context_parts) if context_parts else ""
+        return "\n\n".join(context_parts) if context_parts else ""
 
     # Pattern to strip {ID} prefix and [depends: ...] suffix from task lines
     _TASK_METADATA_RE = re.compile(
@@ -170,10 +170,10 @@ class MemoryManager:
         """
         lines = todo_content.split('\n')
 
-        # If no section specified, return a few uncompleted tasks for minimal awareness
+        # If no section specified, return one uncompleted task for minimal awareness
         if not section:
             uncompleted = [self._clean_task_line(line) for line in lines if '[ ]' in line]
-            return '\n'.join(uncompleted[:3])
+            return uncompleted[0] if uncompleted else ''
 
         # Normalize section name for matching
         section_normalized = section.lower().strip()

@@ -147,46 +147,30 @@ class BaseAgent(ABC):
 
         # Warn about files changed by other agents since our last turn
         if resuming and changed_files:
-            prompt_parts.append("## Files Changed Since Your Last Task")
-            prompt_parts.append(
-                "The following files were modified by other agents since you "
-                "last ran. If you need to read or edit any of them, re-read "
-                "them first — your cached knowledge of their contents is stale."
-            )
-            # Cap the list to avoid bloating the prompt on large changesets
-            display_files = changed_files[:30]
-            for f in display_files:
+            prompt_parts.append("## Stale Files")
+            prompt_parts.append("Re-read before editing:")
+            # Cap at 10 files to reduce tokens
+            for f in changed_files[:10]:
                 prompt_parts.append(f"- {f}")
-            if len(changed_files) > 30:
-                prompt_parts.append(f"- ... and {len(changed_files) - 30} more files")
+            if len(changed_files) > 10:
+                prompt_parts.append(f"(+{len(changed_files) - 10} more)")
             prompt_parts.append("")
 
         # Add project context if provided
         if context:
-            prompt_parts.append("## Current Context")
             prompt_parts.append(context)
             prompt_parts.append("")
 
         # Add the task
-        prompt_parts.append("## Your Task")
-        prompt_parts.append(task)
+        prompt_parts.append("Task: " + task)
         prompt_parts.append("")
 
-        # Add minimal instructions — only items that change Claude's default behavior
-        if not resuming:
-            prompt_parts.append("## Instructions")
-
-            # Browser guardrail: agent-specific
-            # qa_tester gets its own Playwright instructions via system prompt — skip here
-            # software_engineer and ui_ux_engineer may need browser for verification
-            # all others should never touch the browser
-            if self.name in ('database_admin', 'testing_agent', 'security_reviewer', 'project_manager'):
-                prompt_parts.append("- You do not have browser tools. Do not attempt to open or use a browser.")
-            elif self.name in ('software_engineer', 'ui_ux_engineer'):
-                prompt_parts.append("- Never open a browser unless your task explicitly says to test in a browser.")
+        # Minimal instructions - only on first message, only if needed
+        if not resuming and self.name in ('database_admin', 'testing_agent', 'security_reviewer', 'project_manager'):
+            prompt_parts.append("No browser access.")
 
         if is_simple:
-            prompt_parts.append("- Be concise. Do not over-engineer, explore unrelated code, or add unnecessary abstractions.")
+            prompt_parts.append("Be concise.")
 
         return "\n".join(prompt_parts)
 
@@ -233,15 +217,12 @@ class BaseAgent(ABC):
         elif self.model_preference == 'sonnet':
             return model_routing.get('models', {}).get('fast')
         elif self.model_preference == 'auto':
-            # Auto-classify based on task
+            # Auto-classify based on task complexity
             complexity = self._classify_task_complexity(task)
             if complexity == 'simple':
-                model = model_routing.get('models', {}).get('fast')
-                self.log_activity("Model selection", f"Using Sonnet (simple task)")
+                return model_routing.get('models', {}).get('fast')
             else:
-                model = model_routing.get('models', {}).get('powerful')
-                self.log_activity("Model selection", f"Using Opus (complex task)")
-            return model
+                return model_routing.get('models', {}).get('powerful')
 
         return None
 
@@ -589,20 +570,10 @@ class BaseAgent(ABC):
         return output
 
     async def _heartbeat_logger(self, process):
-        """Log periodic heartbeat messages while a process is running."""
-        elapsed = 0
-        interval = 45  # Log every 45 seconds
+        """Keep process alive without logging noise."""
         try:
             while process.returncode is None:
-                await asyncio.sleep(interval)
-                elapsed += interval
-                minutes = elapsed // 60
-                seconds = elapsed % 60
-                if minutes > 0:
-                    time_str = f"{minutes}m {seconds}s"
-                else:
-                    time_str = f"{seconds}s"
-                self.log_activity("Still working...", f"Elapsed: {time_str}")
+                await asyncio.sleep(45)
         except asyncio.CancelledError:
             pass
 
